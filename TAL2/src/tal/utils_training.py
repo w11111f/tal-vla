@@ -185,13 +185,8 @@ def grammatical_action(config, action):
         for i in action['args']:
             if i not in config.object2idx:
                 return False
-    elif action['name'] in ['moveTo', 'pick', 'climbUp', 'climbDown', 'clean']:
+    elif action['name'] in ['moveTo', 'pick', 'drop', 'climbUp', 'climbDown', 'clean']:
         if (len(action['args']) != 1):
-            return False
-    elif action['name'] in ['changeState']:
-        if (len(action['args']) != 2):
-            return False
-        if action['args'][1] in config.object2idx:
             return False
     elif action['name'] in config.noArgumentActions:
         if (len(action['args']) != 0):

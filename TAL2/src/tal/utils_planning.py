@@ -47,10 +47,7 @@ def get_action_pred_with_model_actions(
         elif len(action_args) == 2:
             action_args_1 = object1_array[config.object2idx[action_args[0]]]
             output[0][i] += action_args_1
-            if action_name == 'changeState':
-                action_args_2 = state_array[config.possibleStates.index(action_args[1])]
-            else:
-                action_args_2 = object2_array[config.object2idx[action_args[1]]]
+            action_args_2 = object2_array[config.object2idx[action_args[1]]]
             output[0][i] += action_args_2
 
     return output

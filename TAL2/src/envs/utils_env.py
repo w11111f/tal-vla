@@ -435,8 +435,6 @@ def getPossiblePredicates(config, action):
         return [config.property2Objects['Movable']]
     elif action == 'pushTo':
         return [config.property2Objects['Movable'], config.place_targets]
-    elif action == 'changeState':
-        return [config.hasState, sorted(set(sum(config.object_state_map.values(), [])))]
     elif action == 'pickNplaceAonB':
         return [config.property2Objects['Movable'], config.place_targets]
 

@@ -40,16 +40,8 @@ class EnvironmentConfig:
         self.STATES = [
             "Outside",
             "Inside",
-            "Up",
-            "Down",
             "Grabbed",
             "Free",
-            "Sticky",
-            "Non_Sticky",
-            "Fueled",
-            "Not_Fueled",
-            "Driven",
-            "Not_Driven",
             "Different_Height",
             "Same_Height",
         ]
@@ -61,16 +53,8 @@ class EnvironmentConfig:
         self.INVERSE_STATE = {
             "outside": "inside",
             "inside": "outside",
-            "up": "down",
-            "down": "up",
             "grabbed": "free",
             "free": "grabbed",
-            "sticky": "non_sticky",
-            "non_sticky": "sticky",
-            "fueled": "not_fueled",
-            "not_fueled": "fueled",
-            "driven": "not_driven",
-            "not_driven": "driven",
             "different_height": "same_height",
             "same_height": "different_height",
         }
@@ -149,15 +133,17 @@ class EnvironmentConfig:
         self.place_targets = list(dict.fromkeys(self.surfaceAndContainers))
         self.large_objects = {"big-tray", "stool", "table"}
 
-        # Supported symbolic state toggles for changeState.
-        self.object_state_map = {
-            "cube_red": ["sticky", "non_sticky"],
-            "big-tray": ["driven", "not_driven"],
-            "bottle_red": ["sticky", "non_sticky", "fueled", "not_fueled"],
-            "stool": ["up", "down"],
-        }
-        self.hasState = list(self.object_state_map.keys())
-        self.all_objects_with_states = list(self.object_state_map.keys())
+        # Real-robot deployment defaults: the arm sits near the base center and
+        # should stop the mobile base about 0.5 m from target objects.
+        self.base_approach_distance = 0.50
+        self.pick_approach_distance = 0.50
+        self.place_approach_distance = 0.50
+        self.push_approach_distance = 0.55
+
+        # changeState is removed from the reduced real-robot action space.
+        self.object_state_map = {}
+        self.hasState = []
+        self.all_objects_with_states = []
         self.allStates = {"home": {}, "factory": {}}
         self.initial_object_metrics = {}
         self.usd_metadata = {}
@@ -173,7 +159,7 @@ class EnvironmentConfig:
         self.skip = ["husky"]
 
         # Minimal action set requested by the user.
-        self.possibleActions = ["drop", "pick", "moveTo", "pushTo", "changeState", "pickNplaceAonB"]
+        self.possibleActions = ["drop", "pick", "moveTo", "pushTo", "pickNplaceAonB"]
         self.num_actions = len(self.possibleActions)
         self.noArgumentActions = []
         self.singleArgumentActions = ["moveTo", "pick", "drop"]
@@ -182,7 +168,6 @@ class EnvironmentConfig:
             "pick": 1,
             "drop": 1,
             "pushTo": 2,
-            "changeState": 2,
             "pickNplaceAonB": 2,
         }
 

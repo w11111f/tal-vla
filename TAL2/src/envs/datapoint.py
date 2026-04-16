@@ -186,24 +186,8 @@ class Datapoint:
                         break
                 states.append('Inside' if inside_any else 'Outside')
 
-                if 'Can_Lift' in node['properties']:
-                    current_z = metrics[obj][0][2]
-                    initial_metric = self.config.initial_object_metrics.get(obj, metrics[obj])
-                    initial_z = initial_metric[0][2]
-                    lift_threshold = max(self.config.objects[objID]['size'][2] * 0.3, 0.05)
-                    states.append('Up' if current_z > initial_z + lift_threshold else 'Down')
-
                 if 'Movable' in node['properties']:
                     states.append('Grabbed' if grabbedObj(obj, self.constraints[index]) else 'Free')
-
-                if 'Stickable' in node['properties']:
-                    states.append('Sticky' if obj in self.sticky[index] else 'Non_Sticky')
-
-                if 'Can_Fuel' in node['properties']:
-                    states.append('Fueled' if obj in self.fueled[index] else 'Not_Fueled')
-
-                if 'Drivable' in node['properties']:
-                    states.append('Driven' if obj in self.fixed[index] else 'Not_Driven')
 
                 tmp_diff = abs(metrics[obj][0][2] - metrics['husky'][0][2])
                 states.append('Different_Height' if tmp_diff > 1 else 'Same_Height')
@@ -361,7 +345,7 @@ class Datapoint:
                 dt = 2000  # 移动通常比较耗时
             elif action_name in['constrain', 'removeConstraint', 'changeWing', 'pick', 'drop']:
                 dt = 100   # 夹爪开合耗时较短
-            elif action_name in ['climbUp', 'climbDown', 'changeState', 'pickNplaceAonB', 'pushTo']:
+            elif action_name in ['climbUp', 'climbDown', 'pickNplaceAonB', 'pushTo']:
                 dt = 150   # 复合动作耗时适中
                 
             time += dt

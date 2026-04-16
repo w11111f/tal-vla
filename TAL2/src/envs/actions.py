@@ -6,7 +6,6 @@ SUPPORTED_ACTIONS = {
     "pick",
     "moveTo",
     "pushTo",
-    "changeState",
     "pickNplaceAonB",
 }
 
@@ -59,15 +58,6 @@ def convertActions(inp, world):
 
         elif action_name == "drop":
             action_list.append(["removeConstraint", args[0], "ur5"])
-
-        elif action_name == "changeState":
-            action_list.extend(
-                [
-                    ["moveTo", args[0]],
-                    ["changeWing", "up"],
-                    ["changeState", args[0], args[1]],
-                ]
-            )
 
         action_list.append(["saveBulletState"])
 

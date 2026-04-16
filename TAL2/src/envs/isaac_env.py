@@ -252,19 +252,21 @@ def _get_obj_size(config, obj_name):
     return obj_entry["size"]
 
 
-def _move_robot_near(target_name, distance_scale=0.75):
+def _move_robot_near(target_name, approach_distance=None):
     robot_prim = object_prims["husky"]
     robot_pos = np.array(metrics["husky"][0], dtype=float)
     target_pos = np.array(metrics[target_name][0], dtype=float)
     delta = target_pos[:2] - robot_pos[:2]
     dist = np.linalg.norm(delta)
-    if dist < 1e-6:
-        return
-    direction = delta / dist
-    target_size = _get_obj_size(config_cache, target_name)
-    standoff = max(max(target_size[0], target_size[1]) * distance_scale, 0.45)
+    if approach_distance is None:
+        approach_distance = getattr(config_cache, "base_approach_distance", 0.50)
+    approach_distance = max(float(approach_distance), 0.0)
     new_robot_pos = target_pos.copy()
-    new_robot_pos[:2] = target_pos[:2] - direction * standoff
+    if dist < 1e-6:
+        new_robot_pos[0] = target_pos[0] - approach_distance
+    else:
+        direction = delta / dist
+        new_robot_pos[:2] = target_pos[:2] - direction * approach_distance
     new_robot_pos[2] = robot_pos[2]
     _set_world_pose(robot_prim, new_robot_pos)
     _step()
@@ -293,49 +295,6 @@ def _place_on_target(obj_name, target_name):
     _set_world_pose(object_prims[obj_name], place_pos)
     _step()
     update_metrics()
-
-
-def _apply_object_state(obj_name, normalized_state):
-    if normalized_state in {"sticky", "non_sticky"}:
-        if normalized_state == "sticky":
-            if obj_name not in sticky:
-                sticky.append(obj_name)
-        else:
-            if obj_name in sticky:
-                sticky.remove(obj_name)
-        return
-
-    if normalized_state in {"fueled", "not_fueled"}:
-        if normalized_state == "fueled":
-            if obj_name not in fueled:
-                fueled.append(obj_name)
-        else:
-            if obj_name in fueled:
-                fueled.remove(obj_name)
-        return
-
-    if normalized_state in {"driven", "not_driven"}:
-        if normalized_state == "driven":
-            if obj_name not in fixed:
-                fixed.append(obj_name)
-        else:
-            if obj_name in fixed:
-                fixed.remove(obj_name)
-        return
-
-    if normalized_state in {"up", "down"}:
-        curr_pos = np.array(metrics[obj_name][0], dtype=float)
-        obj_size = _get_obj_size(config_cache, obj_name)
-        base_pose = config_cache.initial_object_metrics.get(obj_name, metrics[obj_name])[0]
-        target_pos = np.array(base_pose, dtype=float)
-        target_pos[:2] = curr_pos[:2]
-        if normalized_state == "up":
-            target_pos[2] = base_pose[2] + max(obj_size[2], 0.15)
-        else:
-            target_pos[2] = base_pose[2]
-        _set_world_pose(object_prims[obj_name], target_pos)
-        _step()
-        update_metrics()
 
 
 def start(config, input_args=None, INPUT_DATAPOINT=None):
@@ -457,7 +416,7 @@ def execute_collect_data(config, symbolic_actions, goal_file=None, saveImg=False
 
     try:
         if act_name == "moveTo":
-            _move_robot_near(args[0])
+            _move_robot_near(args[0], config.base_approach_distance)
 
         elif act_name == "pick":
             target_obj = args[0]
@@ -466,7 +425,7 @@ def execute_collect_data(config, symbolic_actions, goal_file=None, saveImg=False
             if _held_object(constraints) is not None:
                 raise Exception("Logical Rule: Gripper is not free.")
 
-            _move_robot_near(target_obj)
+            _move_robot_near(target_obj, config.pick_approach_distance)
             robot_pos = np.array(metrics["husky"][0], dtype=float)
             obj_size = _get_obj_size(config, target_obj)
             lift_pos = robot_pos.copy()
@@ -500,8 +459,8 @@ def execute_collect_data(config, symbolic_actions, goal_file=None, saveImg=False
             if obj_b not in config.place_targets:
                 raise Exception(f"Logical Rule: Unsupported push target {obj_b}.")
 
-            _move_robot_near(obj_a)
-            _move_robot_near(obj_b, distance_scale=1.0)
+            _move_robot_near(obj_a, config.pick_approach_distance)
+            _move_robot_near(obj_b, config.push_approach_distance)
             _place_on_target(obj_a, obj_b)
 
         elif act_name == "pickNplaceAonB":
@@ -513,26 +472,11 @@ def execute_collect_data(config, symbolic_actions, goal_file=None, saveImg=False
             if obj_a == obj_b:
                 raise Exception("Logical Rule: Cannot place object on itself.")
 
-            _move_robot_near(obj_a)
+            _move_robot_near(obj_a, config.pick_approach_distance)
             constraints["husky"] = [obj_a]
-            _move_robot_near(obj_b)
+            _move_robot_near(obj_b, config.place_approach_distance)
             _place_on_target(obj_a, obj_b)
             constraints["husky"] = []
-
-        elif act_name == "changeState":
-            obj_name, raw_state = args
-            normalized_state = config.normalize_state_name(raw_state)
-            if normalized_state is None:
-                raise Exception(f"Logical Rule: Unsupported state {raw_state}.")
-            if obj_name not in config.object_state_map:
-                raise Exception(f"Logical Rule: {obj_name} has no supported changeState.")
-            if normalized_state not in config.object_state_map[obj_name]:
-                raise Exception(
-                    f"Logical Rule: State {normalized_state} is not valid for {obj_name}."
-                )
-
-            _move_robot_near(obj_name)
-            _apply_object_state(obj_name, normalized_state)
 
         else:
             raise Exception(f"Error: Unsupported high-level action {act_name}.")

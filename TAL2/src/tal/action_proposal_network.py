@@ -18,13 +18,8 @@ def action2vec(config, action, num_objects, num_states):
         predicate1[config.object2idx[action['args'][0]]] = 1
         predicate2[-1] = 1
     else:
-        # * action['args'][1] can be a state or an object.
-        if action['args'][1] in config.object2idx:
-            predicate1[config.object2idx[action['args'][0]]] = 1
-            predicate2[config.object2idx[action['args'][1]]] = 1
-        else:
-            predicate1[config.object2idx[action['args'][0]]] = 1
-            predicate3[config.possibleStates.index(action['args'][1])] = 1
+        predicate1[config.object2idx[action['args'][0]]] = 1
+        predicate2[config.object2idx[action['args'][1]]] = 1
     return torch.cat((actionArray, predicate1, predicate2, predicate3), 0)
 
 
@@ -37,13 +32,8 @@ def action2vec_cons(config, action, num_objects, num_states):
     if len(action['args']) == 1:
         predicate1[config.object2idx[action['args'][0]]] = 1
     elif len(action['args']) == 2:
-        if action['args'][1] in config.object2idx:
-            predicate1[config.object2idx[action['args'][0]]] = 1
-            predicate2[config.object2idx[action['args'][1]]] = 1
-        else:
-            predicate1[config.object2idx[action['args'][0]]] = 1
-            predicate3[config.possibleStates.index(action['args'][1])] = 1
-            # predicate3[config.possibleStates.index(action['args'][1].capitalize())] = 1
+        predicate1[config.object2idx[action['args'][0]]] = 1
+        predicate2[config.object2idx[action['args'][1]]] = 1
     return torch.cat((actionArray, predicate1, predicate2, predicate3), 0)
 
 
@@ -62,25 +52,16 @@ def action2vec_lstm(config, action, num_objects, num_states, num_hidden, embedde
                              device=config.device)
             )
         else:
-            # action['args'][1] can be a state or an object
-            if action['args'][1] in config.object2idx:
-                predicate1 = embedder(
-                    torch.tensor(config.object2vec[action['args'][0]],
-                                 dtype=torch.float32,
-                                 device=config.device)
-                )
-                predicate2 = embedder(
-                    torch.tensor(config.object2vec[action['args'][1]],
-                                 dtype=torch.float32,
-                                 device=config.device)
-                )
-            else:
-                predicate1 = embedder(
-                    torch.tensor(config.object2vec[action['args'][0]],
-                                 dtype=torch.float32,
-                                 device=config.device)
-                )
-                predicate3[config.possibleStates.index(action['args'][1])] = 1
+            predicate1 = embedder(
+                torch.tensor(config.object2vec[action['args'][0]],
+                             dtype=torch.float32,
+                             device=config.device)
+            )
+            predicate2 = embedder(
+                torch.tensor(config.object2vec[action['args'][1]],
+                             dtype=torch.float32,
+                             device=config.device)
+            )
     else:
         actionArray = torch.zeros(len(config.possibleActions))
         actionArray[config.possibleActions.index(action['name'])] = 1
@@ -93,19 +74,12 @@ def action2vec_lstm(config, action, num_objects, num_states, num_hidden, embedde
                 torch.tensor(config.object2vec[action['args'][0]], dtype=torch.float32)
             )
         else:
-            # action['args'][1] can be a state or an object
-            if action['args'][1] in config.object2idx:
-                predicate1 = embedder(
-                    torch.tensor(config.object2vec[action['args'][0]], dtype=torch.float32)
-                )
-                predicate2 = embedder(
-                    torch.tensor(config.object2vec[action['args'][1]], dtype=torch.float32)
-                )
-            else:
-                predicate1 = embedder(
-                    torch.tensor(config.object2vec[action['args'][0]], dtype=torch.float32)
-                )
-                predicate3[config.possibleStates.index(action['args'][1])] = 1
+            predicate1 = embedder(
+                torch.tensor(config.object2vec[action['args'][0]], dtype=torch.float32)
+            )
+            predicate2 = embedder(
+                torch.tensor(config.object2vec[action['args'][1]], dtype=torch.float32)
+            )
 
     return torch.cat((actionArray, predicate1, predicate2, predicate3), 0)
 
@@ -120,13 +94,8 @@ def action2ids(config, action, num_objects, num_states):
         predicate1 = config.object2idx[action['args'][0]]
         predicate2 = num_objects + 1
     else:
-        # * action['args'][1] can be a state or an object
-        if action['args'][1] in config.object2idx:
-            predicate1 = config.object2idx[action['args'][0]]
-            predicate2 = config.object2idx[action['args'][1]]
-        else:
-            predicate1 = config.object2idx[action['args'][0]]
-            predicate2 = num_objects + 1 + config.possibleStates.index(action['args'][1])
+        predicate1 = config.object2idx[action['args'][0]]
+        predicate2 = config.object2idx[action['args'][1]]
     return actionID, predicate1, predicate2
 
 
@@ -173,21 +142,14 @@ def vec2action_grammatical(config, vec, num_objects, num_states, idx2object):
             config.possibleActions) + num_objects + num_objects])
     state_array = list(vec[len(config.possibleActions) + num_objects + num_objects:])
     assert len(state_array) == len(config.possibleStates)
-    if ret_action['name'] == 'changeState':
-        for obj in config.all_objects:
-            if obj not in config.all_objects_with_states:
-                object1_array[config.object2idx[obj]] = 0
-        ret_action['args'][-1] = idx2object[object1_array.index(max(object1_array))]
-        ret_action['args'].append(config.possibleStates[state_array.index(max(state_array))])
-    else:
-        # * 2 objects
+    # * 2 objects
+    object2_ind = object2_array.index(max(object2_array))
+    # * Due to the robot can not place object on itself, if object1 and object2 are the same object,
+    # * we choose the second maximum value.
+    if object1_ind == object2_ind:
+        object2_array[object2_ind] = 0
         object2_ind = object2_array.index(max(object2_array))
-        # * Due to the robot can not place object on itself, if object1 and object2 are the same object,
-        # * we choose the second maximum value.
-        if object1_ind == object2_ind:
-            object2_array[object2_ind] = 0
-            object2_ind = object2_array.index(max(object2_array))
-        ret_action['args'].append(idx2object[object2_ind])
+    ret_action['args'].append(idx2object[object2_ind])
     return ret_action
 
 
