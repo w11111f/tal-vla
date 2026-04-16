@@ -1,0 +1,64 @@
+name: tal-isaaclab
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # This manifest is intended to be applied on top of the existing Isaac Lab environment,
+  # for example:
+  #   conda env update -n isaaclab -f settings/tal.yaml
+  #
+  # Isaac Lab already provides a compatible Python / PyTorch / CUDA runtime.
+  # We intentionally do not pin or reinstall:
+  # - python
+  # - pytorch
+  # - torchvision / torchaudio CUDA builds
+  # - CUDA runtime packages
+  # - external DGL
+  #
+  # The repo now ships a lightweight local `dgl` compatibility module, so the old
+  # `dgl=2.4.0.th23.cu118` dependency is no longer required.
+  - pip
+  - numpy=1.26
+  - scipy=1.13
+  - networkx=3.2
+  - matplotlib=3.9
+  - pillow=10.4
+  - pyyaml=6.0
+  - requests=2.32
+  - tqdm=4.66
+  - psutil=5.9
+  - pandas=2.2
+  - pip:
+      - colorama==0.4.6
+      - termcolor==2.5.0
+      - imageio==2.36.0
+      - gym==0.26.2
+      - gymnasium==0.29.1
+      - hydra-core==1.3.2
+      - hydra-submitit-launcher==1.2.0
+      - omegaconf==2.3.0
+      - submitit==1.5.2
+      - dm-control==1.0.19
+      - dm-env==1.6
+      - dm-tree==0.1.8
+      - mujoco==3.1.5
+      - torchvision==0.22.0
+      - tensordict==0.7.0
+      - torchrl==0.7.0
+      - wandb==0.19.11
+
+  # Removed as incompatible, redundant, or no longer needed in the Isaac Lab setup:
+  # - dgl / cudatoolkit / pytorch / pytorch-cuda / torchvision / torchaudio
+  #   These conflict with Isaac Lab's own Python 3.11 / torch 2.7 / CUDA 12.8 stack.
+  # - mujoco-py
+  #   Not compatible with the default Python 3.11 Isaac Lab environment.
+  # - jax / jaxlib / mujoco-mjx
+  #   Not imported by the current TAL + Isaac Lab pipeline.
+  # - pybullet
+  #   The legacy PyBullet backend has already been removed from the main pipeline.
+  # - attrdict / pydantic / pydantic-core / trimesh
+  #   Not imported by the current project code.
+  # - transformers / mujoco-py / pygame / pytest / rand_param_envs / tensorboard
+  #   These were only needed by the legacy MetaDT stack and are intentionally not
+  #   installed into the default Isaac Lab environment because that stack is not
+  #   validated on Python 3.11.

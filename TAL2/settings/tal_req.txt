@@ -1,0 +1,29 @@
+# 图神经网络
+--find-links https://data.dgl.ai/wheels/cu118/repo.html
+dgl==2.1.0+cu118
+
+# 仿真器相关 (Gym, MuJoCo, PyBullet)
+# gym==0.21.0 我们在后面单独装，避免在此处受阻
+mujoco==3.1.5
+mujoco-mjx==3.1.5
+pybullet==3.2.6
+
+# 强化学习与配置工具
+torchrl==0.4.0
+tensordict==0.4.0
+dm-control==1.0.19
+dm-env==1.6
+dm-tree==0.1.8
+hydra-core==1.4.0.dev1
+omegaconf==2.4.0.dev3
+submitit==1.5.2
+
+# 数据处理与科学计算
+scipy==1.13.1
+matplotlib==3.9.2
+networkx==3.2.1
+pandas==2.2.3
+trimesh==4.5.2
+imageio==2.36.0
+colorama==0.4.6
+pyparsing==3.2.0

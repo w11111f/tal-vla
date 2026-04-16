@@ -2,21 +2,31 @@ __pycache__/
 *.py[cod]
 *.tmp
 *.log
+*.pkl
+*.graph
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
 
 .vscode/
+.idea/
 
 TAL2/checkpoints/
 TAL2/data/
-TAL2/**/*.ckpt
-TAL2/**/*.pkl
+TAL2/**/checkpoints/
+TAL2/**/*.graph
 
 openpi/.git/
+openpi/.git_hidden_for_monorepo/
 openpi/**/.git/
 openpi/third_party/
 openpi/.venv/
 openpi/.uv/
 openpi/.pytest_cache/
-openpi/**/*.ckpt
-openpi/**/*.pkl
-
-*.graph
+openpi/**/checkpoints/
+openpi/**/*.graph
+openpi_repo_backup/
+openpi_flat_export/
