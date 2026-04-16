@@ -568,6 +568,10 @@ def accuracy_score_feature_extractor(config, dataset, model, num_objects=0, TQDM
     data_container = tqdm(dataset, desc='Accuracy Score', ncols=80) if TQDM else dataset
     for (graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name,
          start_node) in data_container:
+        if config.device is not None:
+            graphSeq = [graph.to(config.device) for graph in graphSeq]
+            goal2vec = goal2vec.to(config.device)
+            action2vec = [action.to(config.device) for action in action2vec]
         with torch.no_grad():
             y_pred_list = []
             graphSeq.append(goal2vec)

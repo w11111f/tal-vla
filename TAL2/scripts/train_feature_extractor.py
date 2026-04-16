@@ -4,6 +4,10 @@ import re
 import torch
 import torch.nn as nn
 from torch import optim
+<<<<<<< ours
+=======
+from torch.utils.data import DataLoader
+>>>>>>> theirs
 from termcolor import cprint
 import colorama
 import warnings
@@ -16,6 +20,10 @@ from src.datasets.graph_dataset import GraphDataset_State
 
 colorama.init()
 warnings.filterwarnings('ignore')
+<<<<<<< ours
+=======
+torch.backends.cudnn.benchmark = True
+>>>>>>> theirs
 
 
 def resolve_resume_checkpoint(config, model_name, seq_prefix=''):
@@ -42,7 +50,25 @@ def resolve_resume_checkpoint(config, model_name, seq_prefix=''):
     return latest_ckpt
 
 
+<<<<<<< ours
 def backprop(config, optimizer, dataset, model):
+=======
+def _move_sample_to_device(config, sample):
+    graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node = sample
+    if config.device is None:
+        return sample
+    graphSeq = [graph.to(config.device) for graph in graphSeq]
+    goal2vec = goal2vec.to(config.device)
+    action2vec = [action.to(config.device) for action in action2vec]
+    return graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node
+
+
+def _single_item_collate(batch):
+    return batch[0]
+
+
+def backprop(config, optimizer, dataset, model, accum_steps=1):
+>>>>>>> theirs
     model.train()
     total_loss = 0.0
     action_loss = 0.0
@@ -51,8 +77,18 @@ def backprop(config, optimizer, dataset, model):
     criterion_action = nn.BCELoss()
     criterion_diff_actions = nn.CosineEmbeddingLoss(margin=0.2)
     criterion_feature = nn.MSELoss()
+<<<<<<< ours
 
     for iter_num, (graphSeq, goal2vec, _, actionSeq, action2vec, _, _) in enumerate(dataset):
+=======
+    optimizer.zero_grad(set_to_none=True)
+    micro_step_count = 0
+
+    for iter_num, sample in enumerate(dataset):
+        graphSeq, goal2vec, _, actionSeq, action2vec, _, _ = _move_sample_to_device(
+            config, sample
+        )
+>>>>>>> theirs
 
         graphSeq.append(goal2vec)
         data_len = len(graphSeq)
@@ -64,9 +100,17 @@ def backprop(config, optimizer, dataset, model):
             total_loss += loss.item()
             action_loss += loss.item()
 
+<<<<<<< ours
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+=======
+            (loss / accum_steps).backward()
+            micro_step_count += 1
+            if micro_step_count % accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+>>>>>>> theirs
         else:  # * Action and feature
             for i in range(data_len - 2):
                 # * state_A --> Action[i] --> state_B --> Action[i+1] --> state_C
@@ -107,9 +151,21 @@ def backprop(config, optimizer, dataset, model):
                 action_loss += (loss_action_1.item() + loss_action_2.item())
                 feature_loss += loss_feature.item()
 
+<<<<<<< ours
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+=======
+                (loss / accum_steps).backward()
+                micro_step_count += 1
+                if micro_step_count % accum_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+    if micro_step_count % accum_steps != 0:
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+>>>>>>> theirs
 
     return total_loss, action_loss, feature_loss, diff_action_loss
 
@@ -144,6 +200,30 @@ if __name__ == '__main__':
     print('Val data num: {}'.format(val_data_num))
     cprint('--' * 20, 'green')
 
+<<<<<<< ours
+=======
+    num_workers = int(
+        os.environ.get(
+            'TAL_AFE_NUM_WORKERS',
+            '0' if os.name == 'nt' else str(min(8, os.cpu_count() or 1))
+        )
+    )
+    accum_steps = int(os.environ.get('TAL_AFE_ACCUM_STEPS', '8'))
+    train_loader_kwargs = {
+        'batch_size': 1,
+        'shuffle': False,
+        'num_workers': max(num_workers, 0),
+        'collate_fn': _single_item_collate,
+        'pin_memory': torch.cuda.is_available(),
+    }
+    if train_loader_kwargs['num_workers'] > 0:
+        train_loader_kwargs['persistent_workers'] = True
+        train_loader_kwargs['prefetch_factor'] = 2
+    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
+    print('AFE train loader workers: {}'.format(train_loader_kwargs['num_workers']))
+    print('AFE gradient accumulation steps: {}'.format(accum_steps))
+
+>>>>>>> theirs
     # * ------------------------------------------------------------------------------------------
     model = get_model(config, config.model_name, config.features_dim, config.num_objects)
     seqTool = 'Seq_' if config.training == 'gcn_seq' else ''
@@ -170,9 +250,15 @@ if __name__ == '__main__':
         for epoch_num in range(epoch + 1, config.NUM_EPOCHS):
             scheduler.step(epoch=epoch_num)
             print('EPOCH {}, lr: {}'.format(epoch_num, optimizer.param_groups[0]['lr']))
+<<<<<<< ours
             total_loss, action_loss, feature_loss, diff_action_loss = backprop(config, optimizer,
                                                                                train_dataset,
                                                                                model)
+=======
+            total_loss, action_loss, feature_loss, diff_action_loss = backprop(
+                config, optimizer, train_loader, model, accum_steps=accum_steps
+            )
+>>>>>>> theirs
             # total_loss, action_loss, feature_loss = backprop_batch(config, optimizer, train_dataset, model)
             print('Total loss: {}'.format(total_loss))
             print('Action loss: {}'.format(action_loss))

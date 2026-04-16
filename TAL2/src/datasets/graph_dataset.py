@@ -11,6 +11,7 @@
 import os
 import pickle
 import random
+import torch
 from tqdm import tqdm
 
 from src.utils.misc import convertToDGLGraph
@@ -100,8 +101,6 @@ class GraphDataset():
                                 False,
                                 -1
                             )
-                            if self.config.device is not None:
-                                dgl_graph = dgl_graph.to(self.config.device)
                             tmp_DG.nodes[node_id]['dgl_graph'] = dgl_graph
 
         print('Pre-processing goal data...')
@@ -397,8 +396,6 @@ class GraphDataset_State():
                                 False,
                                 -1
                             )
-                            if self.config.device is not None:
-                                dgl_graph = dgl_graph.to(self.config.device)
                             tmp_DG.nodes[node_id]['dgl_graph'] = dgl_graph
 
         print('Pre-processing goal data...')
@@ -479,11 +476,6 @@ class GraphDataset_State():
                                    DATA_ARGUMENT=self.DATA_ARGUMENT)
         goal_num, world_num, toolSeq, (actionSeq, graphSeq), time = graph
 
-        # * Trans data to device.
-        if (len(dgl_graphs) == 0) and (self.config.device is not None):
-            if len(dgl_graphs) == 0:
-                graphSeq = [graph.to(self.config.device) for graph in graphSeq]
-
         goal2vec = graphSeq[-1]
         graphSeq = graphSeq[:-1]
         try:
@@ -540,8 +532,6 @@ class GraphDataset_State():
                                              self.config.num_objects,
                                              len(self.config.possibleStates))
                 # print(action_vec.shape)
-                if self.config.device is not None:
-                    action_vec = action_vec.to(self.config.device)
                 action_vecs.append(action_vec)
             self.hl_actions.append(hl_action)
             self.action2vecs.append(action_vecs)
@@ -551,12 +541,92 @@ class GraphDataset_State():
             goal2vec, goalObjects2vec = convert_goal_json_to_vec(self.config, goal_json,
                                                                  self.GOAL_OBJ_VEC)
 
-            # * Trans data to device.
-            if self.config.device is not None:
-                goal2vec = goal2vec.to(self.config.device)
-                if self.GOAL_OBJ_VEC:
-                    goalObjects2vec = goalObjects2vec.to(self.config.device)
-
             self.goal_jsons.append(goal_json)
             self.goal2vec.append(goal2vec)
             self.goalObjects2vecs.append(goalObjects2vec)
+
+
+class AFEPairDataset:
+    """Expanded AFE pair samples: (state_A, state_B, action_AB)."""
+
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+class AFETripletDataset:
+    """Expanded AFE triplet samples: (state_A, state_B, state_C, action_AB, action_BC)."""
+
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+class AFEExpandedGraphDataset:
+    """
+    Expand GraphDataset_State sequences into pair/triplet AFE training samples once on CPU.
+    """
+
+    def __init__(self, sequence_dataset):
+        self.sequence_dataset = sequence_dataset
+        self.config = sequence_dataset.config
+        self.pair_samples = []
+        self.triplet_samples = []
+        self._build_samples()
+
+    def _clone_graph(self, graph):
+        cloned = graph.to(graph.device)
+        cloned.ndata = {key: value.clone() for key, value in graph.ndata.items()}
+        cloned.nodes = type(graph.nodes)(cloned)
+        return cloned
+
+    def _clone_tensor(self, tensor):
+        return tensor.clone() if torch.is_tensor(tensor) else tensor
+
+    def _build_samples(self):
+        for idx in tqdm(range(len(self.sequence_dataset)), desc='Expanding AFE samples', ncols=80):
+            graph_seq, goal_graph, _, action_seq, action2vec_seq, _, _ = self.sequence_dataset[idx]
+            states = list(graph_seq) + [goal_graph]
+            if len(states) < 2 or len(action2vec_seq) == 0:
+                continue
+
+            for step in range(len(states) - 1):
+                pair_sample = {
+                    'state_a': self._clone_graph(states[step]),
+                    'state_b': self._clone_graph(states[step + 1]),
+                    'action_ab': self._clone_tensor(action2vec_seq[step]).float(),
+                    'action_ab_text': action_seq[step],
+                    'sequence_index': idx,
+                    'step_index': step,
+                }
+                self.pair_samples.append(pair_sample)
+
+            for step in range(len(states) - 2):
+                triplet_sample = {
+                    'state_a': self._clone_graph(states[step]),
+                    'state_b': self._clone_graph(states[step + 1]),
+                    'state_c': self._clone_graph(states[step + 2]),
+                    'action_ab': self._clone_tensor(action2vec_seq[step]).float(),
+                    'action_bc': self._clone_tensor(action2vec_seq[step + 1]).float(),
+                    'action_ab_text': action_seq[step],
+                    'action_bc_text': action_seq[step + 1],
+                    'sequence_index': idx,
+                    'step_index': step,
+                }
+                self.triplet_samples.append(triplet_sample)
+
+    def get_pair_dataset(self):
+        return AFEPairDataset(self.pair_samples)
+
+    def get_triplet_dataset(self):
+        return AFETripletDataset(self.triplet_samples)

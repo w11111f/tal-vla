@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import torch
 
@@ -43,6 +43,7 @@ class DGLGraph:
                 self._num_nodes = max(self._num_nodes, int(dst.max().item()) + 1)
 
         self.etypes = list(self._edge_dict.keys())
+        self._batch_num_nodes = None
 
     @staticmethod
     def _normalize_edges(edges: Iterable[Tuple[int, int]]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -60,6 +61,9 @@ class DGLGraph:
         moved = DGLGraph.__new__(DGLGraph)
         moved._num_nodes = self._num_nodes
         moved.etypes = list(self.etypes)
+        moved._batch_num_nodes = (
+            None if self._batch_num_nodes is None else self._batch_num_nodes.to(device)
+        )
         moved._edge_dict = {
             etype: (src.to(device), dst.to(device))
             for etype, (src, dst) in self._edge_dict.items()
@@ -81,6 +85,13 @@ class DGLGraph:
             if hasattr(src, "device"):
                 return src.device
         return torch.device("cpu")
+
+    def batch_num_nodes(self, ntype: str = "object"):
+        if ntype != "object":
+            raise KeyError(f"Unsupported node type: {ntype}")
+        if self._batch_num_nodes is None:
+            return torch.tensor([self._num_nodes], dtype=torch.long, device=self.device)
+        return self._batch_num_nodes
 
     def multi_update_all(self, funcs, reducer):
         if reducer != "sum":
@@ -140,4 +151,42 @@ def heterograph(edge_dict, num_nodes_dict=None):
     return DGLGraph(edge_dict, num_nodes_dict=num_nodes_dict)
 
 
-__all__ = ["DGLGraph", "heterograph"]
+def batch(graphs: List[DGLGraph]) -> DGLGraph:
+    if len(graphs) == 0:
+        raise ValueError("Cannot batch an empty graph list.")
+
+    edge_dict = {}
+    offset = 0
+    batch_num_nodes = []
+    for graph in graphs:
+        batch_num_nodes.append(graph._num_nodes)
+        for etype, (src, dst) in graph._edge_dict.items():
+            if etype not in edge_dict:
+                edge_dict[etype] = ([], [])
+            edge_dict[etype][0].append(src + offset)
+            edge_dict[etype][1].append(dst + offset)
+        offset += graph._num_nodes
+
+    canonical_edge_dict = {}
+    for etype, (src_parts, dst_parts) in edge_dict.items():
+        if len(src_parts) == 0:
+            src_tensor = torch.empty(0, dtype=torch.long)
+            dst_tensor = torch.empty(0, dtype=torch.long)
+        else:
+            src_tensor = torch.cat(src_parts, dim=0)
+            dst_tensor = torch.cat(dst_parts, dim=0)
+        canonical_edge_dict[("object", etype, "object")] = list(
+            zip(src_tensor.tolist(), dst_tensor.tolist())
+        )
+
+    batched = DGLGraph(canonical_edge_dict, num_nodes_dict={"object": offset})
+    feature_keys = graphs[0].ndata.keys()
+    batched.ndata = {
+        key: torch.cat([graph.ndata[key] for graph in graphs], dim=0) for key in feature_keys
+    }
+    batched.nodes = _NodeAccessor(batched)
+    batched._batch_num_nodes = torch.tensor(batch_num_nodes, dtype=torch.long, device=batched.device)
+    return batched
+
+
+__all__ = ["DGLGraph", "heterograph", "batch"]

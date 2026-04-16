@@ -74,85 +74,77 @@ class AFE(nn.Module):
         else:
             self.object_vec = torch.tensor(l, dtype=torch.float32)
 
-    def forward(self, g, goalVec):
-        # * g: Start state.
-        # * goalVec: Final state.
+    def _encode_graph(self, graph):
+        hidden = graph.ndata['feat']
+        for layer in self.layers:
+            hidden = layer(graph, hidden)
+        metric_part = graph.ndata['feat']
+        metric_part = self.activation(self.metric_1(metric_part))
+        metric_part = self.activation(self.metric_2(metric_part))
+        return torch.cat([hidden, metric_part], dim=1)
 
-        h_start = g.ndata['feat']
-        for i, layer in enumerate(self.layers):
-            h_start = layer(g, h_start)
-        metric_part_start = g.ndata['feat']
-        metric_part_start = self.activation(self.metric_1(metric_part_start))
-        metric_part_start = self.activation(self.metric_2(metric_part_start))
-        h_start = torch.cat([h_start, metric_part_start], dim=1)
+    def _reshape_objects(self, tensor):
+        total_nodes = tensor.shape[0]
+        if total_nodes % self.n_objects != 0:
+            raise ValueError(
+                f"Expected node count to be divisible by n_objects={self.n_objects}, got {total_nodes}."
+            )
+        batch_size = total_nodes // self.n_objects
+        return tensor.view(batch_size, self.n_objects, -1), batch_size
 
-        # * Shared parameters.
-        # * Use same layer as h_start.
-        h_final = goalVec.ndata['feat']
-        for i, layer in enumerate(self.layers):
-            h_final = layer(goalVec, h_final)
-        metric_part_final = goalVec.ndata['feat']
-        metric_part_final = self.activation(self.metric_1(metric_part_final))
-        metric_part_final = self.activation(self.metric_2(metric_part_final))
-        h_final = torch.cat([h_final, metric_part_final], dim=1)
+    def _decode_outputs(self, final_to_decode):
+        batch_size = final_to_decode.shape[0]
+        action_logits = self.fc3(self.activation(self.fc2(self.activation(self.fc1(final_to_decode)))))
+        action = F.softmax(action_logits, dim=1)
+        max_action_idx = torch.argmax(action, dim=1, keepdim=True)
+        one_hot_action = torch.zeros_like(action)
+        one_hot_action.scatter_(1, max_action_idx, 1.0)
 
-        # * -----------------------------------------------------------
-        # # * Cat
-        # scene_embedding = torch.cat([h_start, h_final], 1)  # * [36, 512]
+        object_embed = self.activation(self.embed(self.object_vec)).unsqueeze(0).expand(
+            batch_size, -1, -1
+        )
 
-        # * Delta feature
-        # scene_embedding = h_final - h_start
-        scene_embedding = torch.abs(h_final - h_start)
-        scene_embedding = self.activation(self.scene_fc_1(scene_embedding))  # * [32, 512]
-        scene_embedding = self.activation(self.scene_fc_2(scene_embedding.t()))  # * [512, 1]
-
-        # * -----------------------------------------------------------
-        delta_feature = self.relu(
-            self.fc_final_to_decode_extension(scene_embedding.t()))  # * [1, 128 * 32]
-        final_to_decode = self.fc_final_to_decode_reduction(delta_feature)  # * [1, 128 * 4]
-
-        # * -----------------------------------------------------------
-        action = self.activation(self.fc1(final_to_decode))
-        action = self.activation(self.fc2(action))
-        action = self.fc3(action)
-        action = F.softmax(action, dim=1)
-        pred_action_values = list(action[0])
-        ind_max_action = pred_action_values.index(max(pred_action_values))
-        one_hot_action = [0] * len(pred_action_values)
-        one_hot_action[ind_max_action] = 1
-        one_hot_action = torch.tensor(one_hot_action, dtype=torch.float32).view(1, -1)
-        if self.config.device is not None:
-            one_hot_action = one_hot_action.to(self.config.device)
-
-        # * Predicting the first argument of the action
-        pred1_input = torch.cat([final_to_decode, one_hot_action], 1)
-        pred1_object = self.activation(self.p1_object(
-            torch.cat([pred1_input.view(-1).repeat(self.n_objects).view(self.n_objects, -1),
-                       self.activation(self.embed(self.object_vec))], 1)))
+        pred1_input = torch.cat([final_to_decode, one_hot_action], dim=1)
+        pred1_expand = pred1_input.unsqueeze(1).expand(-1, self.n_objects, -1)
+        pred1_object = self.activation(self.p1_object(torch.cat([pred1_expand, object_embed], dim=2)))
         pred1_object = self.activation(self.p2_object(pred1_object))
-        pred1_object = self.p3_object(pred1_object)
-        pred1_output = pred1_object
-        pred1_output = torch.sigmoid(pred1_object)
+        pred1_logits = self.p3_object(pred1_object).squeeze(-1)
+        pred1_output = torch.sigmoid(pred1_logits)
 
-        # * Predicting the second argument of the action
-        pred2_input = torch.cat([final_to_decode, one_hot_action], 1)
-        pred2_object = self.activation(self.q1_object(
-            torch.cat([pred2_input.view(-1).repeat(self.n_objects).view(self.n_objects, -1),
-                       self.activation(self.embed(self.object_vec)),
-                       pred1_output.view(self.n_objects, 1)], 1)))
+        pred2_input = torch.cat([final_to_decode, one_hot_action], dim=1)
+        pred2_expand = pred2_input.unsqueeze(1).expand(-1, self.n_objects, -1)
+        pred2_object = self.activation(
+            self.q1_object(
+                torch.cat([pred2_expand, object_embed, pred1_logits.unsqueeze(-1)], dim=2)
+            )
+        )
         pred2_object = self.activation(self.q2_object(pred2_object))
-        pred2_object = self.q3_object(pred2_object)
-        pred2_object = torch.sigmoid(pred2_object)
+        pred2_object = torch.sigmoid(self.q3_object(pred2_object).squeeze(-1))
 
         pred2_state = self.activation(self.q1_state(pred2_input))
         pred2_state = self.activation(self.q2_state(pred2_state))
-        pred2_state = self.q3_state(pred2_state)
-        pred2_state = torch.sigmoid(pred2_state)
-        pred2_output = torch.cat([pred2_object.view(1, -1), pred2_state], 1)
-        predicted_actions = torch.cat(
-            (action, pred1_output.view(1, -1), pred2_output.view(1, -1)), 1
-        ).flatten()
+        pred2_state = torch.sigmoid(self.q3_state(pred2_state))
+        pred2_output = torch.cat([pred2_object, pred2_state], dim=1)
+        predicted_actions = torch.cat((action, pred1_output, pred2_output), dim=1)
+        return predicted_actions
 
+    def forward(self, g, goalVec):
+        # * g: Start state.
+        # * goalVec: Final state.
+        h_start = self._encode_graph(g)
+        h_final = self._encode_graph(goalVec)
+
+        scene_embedding = torch.abs(h_final - h_start)
+        scene_embedding = self.activation(self.scene_fc_1(scene_embedding))
+        scene_embedding, batch_size = self._reshape_objects(scene_embedding)
+        scene_embedding = self.activation(self.scene_fc_2(scene_embedding.transpose(1, 2))).squeeze(-1)
+
+        delta_feature = self.relu(self.fc_final_to_decode_extension(scene_embedding))
+        final_to_decode = self.fc_final_to_decode_reduction(delta_feature)
+        predicted_actions = self._decode_outputs(final_to_decode)
+
+        if batch_size == 1:
+            return predicted_actions.squeeze(0), delta_feature.squeeze(0)
         return predicted_actions, delta_feature
 
 
@@ -223,82 +215,75 @@ class AFE_MLP(nn.Module):
         else:
             self.object_vec = torch.tensor(l, dtype=torch.float32)
 
-    def forward(self, g, goalVec):
-        # * g: Start state.
-        # * goalVec: Final state.
-        h_start = g.ndata['feat']
-        for i, layer in enumerate(self.layers):
-            h_start = layer(h_start)
-        metric_part_start = g.ndata['feat']
-        metric_part_start = self.activation(self.metric_1(metric_part_start))
-        metric_part_start = self.activation(self.metric_2(metric_part_start))
-        h_start = torch.cat([h_start, metric_part_start], dim=1)
+    def _encode_graph(self, graph):
+        hidden = graph.ndata['feat']
+        for layer in self.layers:
+            hidden = layer(hidden)
+        metric_part = graph.ndata['feat']
+        metric_part = self.activation(self.metric_1(metric_part))
+        metric_part = self.activation(self.metric_2(metric_part))
+        return torch.cat([hidden, metric_part], dim=1)
 
-        # * Shared parameters.
-        # * Use same layer as h_start.
-        h_final = goalVec.ndata['feat']
-        for i, layer in enumerate(self.layers):
-            h_final = layer(h_final)
-        metric_part_final = goalVec.ndata['feat']
-        metric_part_final = self.activation(self.metric_1(metric_part_final))
-        metric_part_final = self.activation(self.metric_2(metric_part_final))
-        h_final = torch.cat([h_final, metric_part_final], dim=1)
+    def _reshape_objects(self, tensor):
+        total_nodes = tensor.shape[0]
+        if total_nodes % self.n_objects != 0:
+            raise ValueError(
+                f"Expected node count to be divisible by n_objects={self.n_objects}, got {total_nodes}."
+            )
+        batch_size = total_nodes // self.n_objects
+        return tensor.view(batch_size, self.n_objects, -1), batch_size
 
-        # * -----------------------------------------------------------
-        # # * Cat
-        # scene_embedding = torch.cat([h_start, h_final], 1)  # * [36, 512]
+    def _decode_outputs(self, final_to_decode):
+        batch_size = final_to_decode.shape[0]
+        action_logits = self.fc3(self.activation(self.fc2(self.activation(self.fc1(final_to_decode)))))
+        action = F.softmax(action_logits, dim=1)
+        max_action_idx = torch.argmax(action, dim=1, keepdim=True)
+        one_hot_action = torch.zeros_like(action)
+        one_hot_action.scatter_(1, max_action_idx, 1.0)
 
-        # * Delta feature
-        # scene_embedding = h_final - h_start
-        scene_embedding = torch.abs(h_final - h_start)
-        scene_embedding = self.activation(self.scene_fc_1(scene_embedding))  # * [32, 512]
-        scene_embedding = self.activation(self.scene_fc_2(scene_embedding.t()))  # * [512, 1]
+        object_embed = self.activation(self.embed(self.object_vec)).unsqueeze(0).expand(
+            batch_size, -1, -1
+        )
 
-        # * -----------------------------------------------------------
-        delta_feature = self.relu(
-            self.fc_final_to_decode_extension(scene_embedding.t()))  # * [1, 128 * 32]
-        final_to_decode = self.fc_final_to_decode_reduction(delta_feature)  # * [1, 128 * 4]
-
-        # * -----------------------------------------------------------
-        action = self.activation(self.fc1(final_to_decode))
-        action = self.activation(self.fc2(action))
-        action = self.fc3(action)
-        action = F.softmax(action, dim=1)
-        pred_action_values = list(action[0])
-        ind_max_action = pred_action_values.index(max(pred_action_values))
-        one_hot_action = [0] * len(pred_action_values)
-        one_hot_action[ind_max_action] = 1
-        one_hot_action = torch.tensor(one_hot_action, dtype=torch.float32).view(1, -1)
-        if self.config.device is not None:
-            one_hot_action = one_hot_action.to(self.config.device)
-
-        # * Predicting the first argument of the action
-        pred1_input = torch.cat([final_to_decode, one_hot_action], 1)
-        pred1_object = self.activation(self.p1_object(
-            torch.cat([pred1_input.view(-1).repeat(self.n_objects).view(self.n_objects, -1),
-                       self.activation(self.embed(self.object_vec))], 1)))
+        pred1_input = torch.cat([final_to_decode, one_hot_action], dim=1)
+        pred1_expand = pred1_input.unsqueeze(1).expand(-1, self.n_objects, -1)
+        pred1_object = self.activation(self.p1_object(torch.cat([pred1_expand, object_embed], dim=2)))
         pred1_object = self.activation(self.p2_object(pred1_object))
-        pred1_object = self.p3_object(pred1_object)
-        pred1_output = pred1_object
-        pred1_output = torch.sigmoid(pred1_object)
+        pred1_logits = self.p3_object(pred1_object).squeeze(-1)
+        pred1_output = torch.sigmoid(pred1_logits)
 
-        # * Predicting the second argument of the action
-        pred2_input = torch.cat([final_to_decode, one_hot_action], 1)
-        pred2_object = self.activation(self.q1_object(
-            torch.cat([pred2_input.view(-1).repeat(self.n_objects).view(self.n_objects, -1),
-                       self.activation(self.embed(self.object_vec)),
-                       pred1_output.view(self.n_objects, 1)], 1)))
+        pred2_input = torch.cat([final_to_decode, one_hot_action], dim=1)
+        pred2_expand = pred2_input.unsqueeze(1).expand(-1, self.n_objects, -1)
+        pred2_object = self.activation(
+            self.q1_object(
+                torch.cat([pred2_expand, object_embed, pred1_logits.unsqueeze(-1)], dim=2)
+            )
+        )
         pred2_object = self.activation(self.q2_object(pred2_object))
-        pred2_object = self.q3_object(pred2_object)
-        pred2_object = torch.sigmoid(pred2_object)
+        pred2_object = torch.sigmoid(self.q3_object(pred2_object).squeeze(-1))
 
         pred2_state = self.activation(self.q1_state(pred2_input))
         pred2_state = self.activation(self.q2_state(pred2_state))
-        pred2_state = self.q3_state(pred2_state)
-        pred2_state = torch.sigmoid(pred2_state)
-        pred2_output = torch.cat([pred2_object.view(1, -1), pred2_state], 1)
-        predicted_actions = torch.cat(
-            (action, pred1_output.view(1, -1), pred2_output.view(1, -1)), 1
-        ).flatten()
+        pred2_state = torch.sigmoid(self.q3_state(pred2_state))
+        pred2_output = torch.cat([pred2_object, pred2_state], dim=1)
+        predicted_actions = torch.cat((action, pred1_output, pred2_output), dim=1)
+        return predicted_actions
 
+    def forward(self, g, goalVec):
+        # * g: Start state.
+        # * goalVec: Final state.
+        h_start = self._encode_graph(g)
+        h_final = self._encode_graph(goalVec)
+
+        scene_embedding = torch.abs(h_final - h_start)
+        scene_embedding = self.activation(self.scene_fc_1(scene_embedding))
+        scene_embedding, batch_size = self._reshape_objects(scene_embedding)
+        scene_embedding = self.activation(self.scene_fc_2(scene_embedding.transpose(1, 2))).squeeze(-1)
+
+        delta_feature = self.relu(self.fc_final_to_decode_extension(scene_embedding))
+        final_to_decode = self.fc_final_to_decode_reduction(delta_feature)
+        predicted_actions = self._decode_outputs(final_to_decode)
+
+        if batch_size == 1:
+            return predicted_actions.squeeze(0), delta_feature.squeeze(0)
         return predicted_actions, delta_feature
