@@ -1,29 +1,27 @@
 import os
 import pickle
 import re
+import time
+import warnings
+
+import colorama
+import dgl
 import torch
 import torch.nn as nn
-from torch import optim
-<<<<<<< ours
-=======
-from torch.utils.data import DataLoader
->>>>>>> theirs
 from termcolor import cprint
-import colorama
-import warnings
+from torch import optim
+from torch.utils.data import DataLoader
+
 from src.config.config import init_args
-from src.utils.misc import setup_seed
+from src.datasets.graph_dataset import AFEExpandedGraphDataset, GraphDataset_State
 from src.envs.CONSTANTS import EnvironmentConfig
-from src.tal.utils_training import get_model, load_model, save_model
 from src.tal.utils_training import accuracy_score_feature_extractor
-from src.datasets.graph_dataset import GraphDataset_State
+from src.tal.utils_training import get_model, load_model, save_model
+from src.utils.misc import setup_seed
 
 colorama.init()
 warnings.filterwarnings('ignore')
-<<<<<<< ours
-=======
 torch.backends.cudnn.benchmark = True
->>>>>>> theirs
 
 
 def resolve_resume_checkpoint(config, model_name, seq_prefix=''):
@@ -50,124 +48,173 @@ def resolve_resume_checkpoint(config, model_name, seq_prefix=''):
     return latest_ckpt
 
 
-<<<<<<< ours
-def backprop(config, optimizer, dataset, model):
-=======
-def _move_sample_to_device(config, sample):
-    graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node = sample
-    if config.device is None:
-        return sample
-    graphSeq = [graph.to(config.device) for graph in graphSeq]
-    goal2vec = goal2vec.to(config.device)
-    action2vec = [action.to(config.device) for action in action2vec]
-    return graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node
+def _move_graph_to_device(graph, device):
+    return graph.to(device) if device is not None else graph
 
 
-def _single_item_collate(batch):
-    return batch[0]
+def _move_tensor_to_device(tensor, device):
+    return tensor.to(device, non_blocking=True) if device is not None else tensor
 
 
-def backprop(config, optimizer, dataset, model, accum_steps=1):
->>>>>>> theirs
+def _ensure_batch_dim(tensor):
+    if torch.is_tensor(tensor) and tensor.dim() == 1:
+        return tensor.unsqueeze(0)
+    return tensor
+
+
+def _pair_collate(batch):
+    state_a = dgl.batch([item['state_a'] for item in batch])
+    state_b = dgl.batch([item['state_b'] for item in batch])
+    action_ab = torch.stack([item['action_ab'] for item in batch], dim=0)
+    return {
+        'state_a': state_a,
+        'state_b': state_b,
+        'action_ab': action_ab,
+        'batch_size': len(batch),
+    }
+
+
+def _triplet_collate(batch):
+    state_a = dgl.batch([item['state_a'] for item in batch])
+    state_b = dgl.batch([item['state_b'] for item in batch])
+    state_c = dgl.batch([item['state_c'] for item in batch])
+    action_ab = torch.stack([item['action_ab'] for item in batch], dim=0)
+    action_bc = torch.stack([item['action_bc'] for item in batch], dim=0)
+    return {
+        'state_a': state_a,
+        'state_b': state_b,
+        'state_c': state_c,
+        'action_ab': action_ab,
+        'action_bc': action_bc,
+        'batch_size': len(batch),
+    }
+
+
+def _build_loader(dataset, batch_size, shuffle, num_workers, collate_fn):
+    loader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': shuffle,
+        'num_workers': max(num_workers, 0),
+        'collate_fn': collate_fn,
+        'pin_memory': torch.cuda.is_available(),
+    }
+    if loader_kwargs['num_workers'] > 0:
+        loader_kwargs['persistent_workers'] = True
+        loader_kwargs['prefetch_factor'] = 2
+    return DataLoader(dataset, **loader_kwargs)
+
+
+def _rowwise_action_similarity(action_ab, action_bc):
+    return torch.where(
+        torch.all(torch.isclose(action_ab, action_bc), dim=1),
+        torch.ones(action_ab.shape[0], device=action_ab.device),
+        -torch.ones(action_ab.shape[0], device=action_ab.device),
+    )
+
+
+def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_steps=1):
     model.train()
-    total_loss = 0.0
-    action_loss = 0.0
-    feature_loss = 0.0
-    diff_action_loss = 0.0
     criterion_action = nn.BCELoss()
     criterion_diff_actions = nn.CosineEmbeddingLoss(margin=0.2)
     criterion_feature = nn.MSELoss()
-<<<<<<< ours
 
-    for iter_num, (graphSeq, goal2vec, _, actionSeq, action2vec, _, _) in enumerate(dataset):
-=======
+    metrics = {
+        'total_loss': 0.0,
+        'action_loss': 0.0,
+        'feature_loss': 0.0,
+        'diff_action_loss': 0.0,
+        'pair_samples': 0,
+        'triplet_samples': 0,
+    }
+
+    epoch_start = time.perf_counter()
+    data_time = 0.0
+    compute_time = 0.0
     optimizer.zero_grad(set_to_none=True)
     micro_step_count = 0
 
-    for iter_num, sample in enumerate(dataset):
-        graphSeq, goal2vec, _, actionSeq, action2vec, _, _ = _move_sample_to_device(
-            config, sample
-        )
->>>>>>> theirs
+    triplet_iter_start = time.perf_counter()
+    for batch in triplet_loader:
+        data_time += time.perf_counter() - triplet_iter_start
 
-        graphSeq.append(goal2vec)
-        data_len = len(graphSeq)
-        if data_len < 3:  # * Action
-            y_pred, _ = model(graphSeq[0], graphSeq[1])
-            y_true = action2vec[0]
+        compute_start = time.perf_counter()
+        state_a = _move_graph_to_device(batch['state_a'], config.device)
+        state_b = _move_graph_to_device(batch['state_b'], config.device)
+        state_c = _move_graph_to_device(batch['state_c'], config.device)
+        action_ab = _move_tensor_to_device(batch['action_ab'], config.device)
+        action_bc = _move_tensor_to_device(batch['action_bc'], config.device)
 
-            loss = criterion_action(y_pred, y_true)
-            total_loss += loss.item()
-            action_loss += loss.item()
+        y_pred_ab, delta_ab = model(state_a, state_b)
+        y_pred_bc, delta_bc = model(state_b, state_c)
+        _, delta_ac = model(state_a, state_c)
+        y_pred_ab = _ensure_batch_dim(y_pred_ab)
+        y_pred_bc = _ensure_batch_dim(y_pred_bc)
+        delta_ab = _ensure_batch_dim(delta_ab)
+        delta_bc = _ensure_batch_dim(delta_bc)
+        delta_ac = _ensure_batch_dim(delta_ac)
 
-<<<<<<< ours
-            optimizer.zero_grad()
-            loss.backward()
+        loss_action_1 = criterion_action(y_pred_ab, action_ab)
+        loss_action_2 = criterion_action(y_pred_bc, action_bc)
+        loss_feature = criterion_feature(delta_ac, delta_ab + delta_bc)
+        y_cosine_embed = _rowwise_action_similarity(action_ab, action_bc)
+        loss_diff_actions = criterion_diff_actions(delta_ab, delta_bc, y_cosine_embed)
+        loss = loss_action_1 + loss_action_2 + loss_feature + loss_diff_actions
+
+        (loss / accum_steps).backward()
+        micro_step_count += 1
+        if micro_step_count % accum_steps == 0:
             optimizer.step()
-=======
-            (loss / accum_steps).backward()
-            micro_step_count += 1
-            if micro_step_count % accum_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
->>>>>>> theirs
-        else:  # * Action and feature
-            for i in range(data_len - 2):
-                # * state_A --> Action[i] --> state_B --> Action[i+1] --> state_C
-                state_A = graphSeq[i]
-                state_B = graphSeq[i + 1]
-                state_C = graphSeq[i + 2]
+            optimizer.zero_grad(set_to_none=True)
 
-                y_true_AB = action2vec[i]
-                y_true_BC = action2vec[i + 1]
+        metrics['total_loss'] += loss.item()
+        metrics['action_loss'] += (loss_action_1.item() + loss_action_2.item())
+        metrics['feature_loss'] += loss_feature.item()
+        metrics['diff_action_loss'] += loss_diff_actions.item()
+        metrics['triplet_samples'] += batch['batch_size']
+        compute_time += time.perf_counter() - compute_start
+        triplet_iter_start = time.perf_counter()
 
-                y_pred_AB, delta_feature_AB = model(state_A, state_B)
-                y_pred_BC, delta_feature_BC = model(state_B, state_C)
-                y_pred_AC, delta_feature_AC = model(state_A, state_C)
+    pair_iter_start = time.perf_counter()
+    for batch in pair_loader:
+        data_time += time.perf_counter() - pair_iter_start
 
-                loss_action_1 = criterion_action(y_pred_AB, y_true_AB)
-                loss_action_2 = criterion_action(y_pred_BC, y_true_BC)
-                loss_feature = criterion_feature(delta_feature_AC,
-                                                 delta_feature_AB + delta_feature_BC)
+        compute_start = time.perf_counter()
+        state_a = _move_graph_to_device(batch['state_a'], config.device)
+        state_b = _move_graph_to_device(batch['state_b'], config.device)
+        action_ab = _move_tensor_to_device(batch['action_ab'], config.device)
 
-                # * Different actions --> different features.
-                if torch.equal(y_true_AB, y_true_BC):
-                    y_cosine_embed = torch.tensor([1], device=config.device)
-                else:
-                    y_cosine_embed = torch.tensor([-1], device=config.device)
-                loss_diff_actions = criterion_diff_actions(delta_feature_AB, delta_feature_BC,
-                                                           y_cosine_embed)
-                diff_action_loss += loss_diff_actions.item()
+        y_pred_ab, _ = model(state_a, state_b)
+        y_pred_ab = _ensure_batch_dim(y_pred_ab)
+        loss = criterion_action(y_pred_ab, action_ab)
 
-                loss = loss_action_1 + loss_action_2 + loss_feature + loss_diff_actions
+        (loss / accum_steps).backward()
+        micro_step_count += 1
+        if micro_step_count % accum_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
-                # loss = loss_action_1 + loss_action_2 + loss_feature
-                # if not torch.equal(y_true_AB, y_true_BC):
-                #     loss_diff_actions = 0.1 * criterion_diff_actions(delta_feature_AB, delta_feature_BC)
-                #     diff_action_loss += loss_diff_actions.item()
-                #     loss = loss + loss_diff_actions
-
-                total_loss += loss.item()
-                action_loss += (loss_action_1.item() + loss_action_2.item())
-                feature_loss += loss_feature.item()
-
-<<<<<<< ours
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-=======
-                (loss / accum_steps).backward()
-                micro_step_count += 1
-                if micro_step_count % accum_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
+        metrics['total_loss'] += loss.item()
+        metrics['action_loss'] += loss.item()
+        metrics['pair_samples'] += batch['batch_size']
+        compute_time += time.perf_counter() - compute_start
+        pair_iter_start = time.perf_counter()
 
     if micro_step_count % accum_steps != 0:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
->>>>>>> theirs
 
-    return total_loss, action_loss, feature_loss, diff_action_loss
+    total_time = time.perf_counter() - epoch_start
+    processed_samples = metrics['pair_samples'] + metrics['triplet_samples']
+    metrics['data_time'] = data_time
+    metrics['compute_time'] = compute_time
+    metrics['total_time'] = total_time
+    metrics['samples_per_second'] = (
+        processed_samples / total_time if total_time > 0 else 0.0
+    )
+    metrics['triplets_per_second'] = (
+        metrics['triplet_samples'] / total_time if total_time > 0 else 0.0
+    )
+    return metrics
 
 
 if __name__ == '__main__':
@@ -183,48 +230,55 @@ if __name__ == '__main__':
     args.num_epochs = 300
     config = EnvironmentConfig(args)
 
-    # * ------------------------------------------------------------------------------------------
-    # * Load data.
     graphs_dir = './data/home/'
     train_data_path = './data/train_dataset.pkl'
-    train_dataset = GraphDataset_State(config, graphs_dir, train_data_path)
+    train_sequence_dataset = GraphDataset_State(config, graphs_dir, train_data_path)
 
     val_data_path = './data/val_dataset.pkl'
     val_dataset = GraphDataset_State(config, graphs_dir, val_data_path)
 
-    train_data_num = len(train_dataset)
+    train_data_num = len(train_sequence_dataset)
     val_data_num = len(val_dataset)
 
     cprint('--' * 20, 'green')
-    print('Train data num: {}'.format(train_data_num))
+    print('Train sequence num: {}'.format(train_data_num))
     print('Val data num: {}'.format(val_data_num))
     cprint('--' * 20, 'green')
 
-<<<<<<< ours
-=======
+    print('Expanding train sequences into AFE pair/triplet samples...')
+    expanded_train_dataset = AFEExpandedGraphDataset(train_sequence_dataset)
+    pair_dataset = expanded_train_dataset.get_pair_dataset()
+    triplet_dataset = expanded_train_dataset.get_triplet_dataset()
+    print('AFE pair samples: {}'.format(len(pair_dataset)))
+    print('AFE triplet samples: {}'.format(len(triplet_dataset)))
+
     num_workers = int(
         os.environ.get(
             'TAL_AFE_NUM_WORKERS',
             '0' if os.name == 'nt' else str(min(8, os.cpu_count() or 1))
         )
     )
-    accum_steps = int(os.environ.get('TAL_AFE_ACCUM_STEPS', '8'))
-    train_loader_kwargs = {
-        'batch_size': 1,
-        'shuffle': False,
-        'num_workers': max(num_workers, 0),
-        'collate_fn': _single_item_collate,
-        'pin_memory': torch.cuda.is_available(),
-    }
-    if train_loader_kwargs['num_workers'] > 0:
-        train_loader_kwargs['persistent_workers'] = True
-        train_loader_kwargs['prefetch_factor'] = 2
-    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
-    print('AFE train loader workers: {}'.format(train_loader_kwargs['num_workers']))
+    batch_size = int(os.environ.get('TAL_AFE_BATCH_SIZE', '32'))
+    accum_steps = int(os.environ.get('TAL_AFE_ACCUM_STEPS', '1'))
+    print('AFE batch size: {}'.format(batch_size))
+    print('AFE loader workers: {}'.format(num_workers))
     print('AFE gradient accumulation steps: {}'.format(accum_steps))
 
->>>>>>> theirs
-    # * ------------------------------------------------------------------------------------------
+    pair_loader = _build_loader(
+        pair_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=_pair_collate,
+    )
+    triplet_loader = _build_loader(
+        triplet_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=_triplet_collate,
+    )
+
     model = get_model(config, config.model_name, config.features_dim, config.num_objects)
     seqTool = 'Seq_' if config.training == 'gcn_seq' else ''
 
@@ -250,44 +304,56 @@ if __name__ == '__main__':
         for epoch_num in range(epoch + 1, config.NUM_EPOCHS):
             scheduler.step(epoch=epoch_num)
             print('EPOCH {}, lr: {}'.format(epoch_num, optimizer.param_groups[0]['lr']))
-<<<<<<< ours
-            total_loss, action_loss, feature_loss, diff_action_loss = backprop(config, optimizer,
-                                                                               train_dataset,
-                                                                               model)
-=======
-            total_loss, action_loss, feature_loss, diff_action_loss = backprop(
-                config, optimizer, train_loader, model, accum_steps=accum_steps
+            metrics = train_epoch(
+                config,
+                optimizer,
+                model,
+                pair_loader,
+                triplet_loader,
+                accum_steps=accum_steps,
             )
->>>>>>> theirs
-            # total_loss, action_loss, feature_loss = backprop_batch(config, optimizer, train_dataset, model)
-            print('Total loss: {}'.format(total_loss))
-            print('Action loss: {}'.format(action_loss))
-            print('Feature loss: {}'.format(feature_loss))
-            print('Diff action feature loss: {}'.format(diff_action_loss))
+            print('Total loss: {}'.format(metrics['total_loss']))
+            print('Action loss: {}'.format(metrics['action_loss']))
+            print('Feature loss: {}'.format(metrics['feature_loss']))
+            print('Diff action feature loss: {}'.format(metrics['diff_action_loss']))
+            print(
+                'Epoch timing: data={:.2f}s compute={:.2f}s total={:.2f}s'.format(
+                    metrics['data_time'], metrics['compute_time'], metrics['total_time']
+                )
+            )
+            print(
+                'Throughput: {:.2f} samples/s, {:.2f} triplets/s'.format(
+                    metrics['samples_per_second'], metrics['triplets_per_second']
+                )
+            )
 
-            # * ------------------------------------------------------------------------------------------
-            # * Update learning rate.
-            # if epoch_num in [100]:  # * 1e-5
-            #     lr = lr / 10
-            #     print('Change learning rate to {}'.format(lr))
-            #     for param_group in optimizer.param_groups:
-            #         param_group['lr'] = lr
-
-            # * ------------------------------------------------------------------------------------------
             t1, t2, t3 = 0, 0, 0
-            if ((epoch_num > 50) and (total_loss < 50) and (epoch_num + 1) % test_frequency == 0):
-                # * Test action predict accuracy.
-                t1 = accuracy_score_feature_extractor(config, train_dataset, model,
-                                                      config.num_objects, TQDM=False)
+            if (
+                (epoch_num > 50)
+                and (metrics['total_loss'] < 50)
+                and (epoch_num + 1) % test_frequency == 0
+            ):
+                t1 = accuracy_score_feature_extractor(
+                    config, train_sequence_dataset, model, config.num_objects, TQDM=False
+                )
                 print('Train Accuracy (action): {}'.format(t1))
-                t2 = accuracy_score_feature_extractor(config, val_dataset, model,
-                                                      config.num_objects, TQDM=False)
+                t2 = accuracy_score_feature_extractor(
+                    config, val_dataset, model, config.num_objects, TQDM=False
+                )
                 print('Val Accuracy (action): {}'.format(t2))
 
-            accuracy_list.append((t1, t2, t3, total_loss, action_loss, feature_loss))
+            accuracy_list.append(
+                (
+                    t1,
+                    t2,
+                    t3,
+                    metrics['total_loss'],
+                    metrics['action_loss'],
+                    metrics['feature_loss'],
+                )
+            )
 
-            # * Save model
-            file_path = save_model(config, model, optimizer, epoch_num, accuracy_list)
+            save_model(config, model, optimizer, epoch_num, accuracy_list)
 
         train_acc = [i[0] for i in accuracy_list]
         val_acc = [i[1] for i in accuracy_list]

@@ -600,14 +600,14 @@ class AFEExpandedGraphDataset:
             if len(states) < 2 or len(action2vec_seq) == 0:
                 continue
 
-            for step in range(len(states) - 1):
+            if len(states) == 2:
                 pair_sample = {
-                    'state_a': self._clone_graph(states[step]),
-                    'state_b': self._clone_graph(states[step + 1]),
-                    'action_ab': self._clone_tensor(action2vec_seq[step]).float(),
-                    'action_ab_text': action_seq[step],
+                    'state_a': self._clone_graph(states[0]),
+                    'state_b': self._clone_graph(states[1]),
+                    'action_ab': self._clone_tensor(action2vec_seq[0]).float(),
+                    'action_ab_text': action_seq[0],
                     'sequence_index': idx,
-                    'step_index': step,
+                    'step_index': 0,
                 }
                 self.pair_samples.append(pair_sample)
 
