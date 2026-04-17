@@ -630,3 +630,57 @@ class AFEExpandedGraphDataset:
 
     def get_triplet_dataset(self):
         return AFETripletDataset(self.triplet_samples)
+
+
+class APNPairDataset:
+    """Expanded APN pair samples: (state_a, goal_state, action_ab)."""
+
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+class APNExpandedGraphDataset:
+    """
+    Expand GraphDataset_State sequences into independent APN training samples once on CPU.
+    Each transition becomes one (current_state, goal_state, action) sample.
+    """
+
+    def __init__(self, sequence_dataset):
+        self.sequence_dataset = sequence_dataset
+        self.config = sequence_dataset.config
+        self.samples = []
+        self._build_samples()
+
+    def _clone_graph(self, graph):
+        cloned = graph.to(graph.device)
+        cloned.ndata = {key: value.clone() for key, value in graph.ndata.items()}
+        cloned.nodes = type(graph.nodes)(cloned)
+        return cloned
+
+    def _clone_tensor(self, tensor):
+        return tensor.clone() if torch.is_tensor(tensor) else tensor
+
+    def _build_samples(self):
+        for idx in tqdm(range(len(self.sequence_dataset)), desc='Expanding APN samples', ncols=80):
+            graph_seq, goal_graph, _, action_seq, action2vec_seq, _, _ = self.sequence_dataset[idx]
+            if len(graph_seq) == 0 or len(action2vec_seq) == 0:
+                continue
+
+            for step in range(len(graph_seq)):
+                self.samples.append({
+                    'state_a': self._clone_graph(graph_seq[step]),
+                    'goal_state': self._clone_graph(goal_graph),
+                    'action_ab': self._clone_tensor(action2vec_seq[step]).float(),
+                    'action_ab_text': action_seq[step],
+                    'sequence_index': idx,
+                    'step_index': step,
+                })
+
+    def get_pair_dataset(self):
+        return APNPairDataset(self.samples)

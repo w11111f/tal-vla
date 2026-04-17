@@ -12,11 +12,42 @@ from src.datasets.graph_dataset import GraphDataset_State
 warnings.filterwarnings('ignore')
 
 
+def _ensure_graph_device(graph, device):
+    graph = graph.to(device)
+    if hasattr(graph, 'ndata'):
+        for key, value in list(graph.ndata.items()):
+            if torch.is_tensor(value) and value.device != device:
+                graph.ndata[key] = value.to(device)
+    return graph
+
+
+def _move_sequence_to_device(config, graphSeq, goal2vec):
+    if config.device is None:
+        return graphSeq, goal2vec
+    graphSeq = [_ensure_graph_device(graph, config.device) for graph in graphSeq]
+    goal2vec = _ensure_graph_device(goal2vec, config.device)
+    return graphSeq, goal2vec
+
+
+def _log_devices_once(model, graph_a, graph_b):
+    if getattr(_log_devices_once, "_done", False):
+        return
+    model_device = next(model.parameters()).device
+    graph_a_device = graph_a.ndata['feat'].device
+    graph_b_device = graph_b.ndata['feat'].device
+    print(
+        f"[AFE feature generation] model={model_device}, "
+        f"state_a.feat={graph_a_device}, state_b.feat={graph_b_device}"
+    )
+    _log_devices_once._done = True
+
+
 def generate_action_features(config, dataset, model, action_names, action_features):
     model.eval()
 
     for (graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node) in tqdm(
             dataset, ncols=80):
+        graphSeq, goal2vec = _move_sequence_to_device(config, graphSeq, goal2vec)
         graphSeq.append(goal2vec)
         with torch.no_grad():
             for i in range(len(graphSeq) - 1):
@@ -24,7 +55,9 @@ def generate_action_features(config, dataset, model, action_names, action_featur
                 if actionSeq[i] in action_names:
                     tmp_idx = action_names.index(actionSeq[i])
                 else:
+                    _log_devices_once(model, graphSeq[i], graphSeq[i + 1])
                     output, output_features = model(graphSeq[i], graphSeq[i + 1])
+                    output_features = output_features.detach().cpu()
                     if tmp_idx is not None:
                         tmp_idx += 1
                         action_names.insert(tmp_idx, actionSeq[i])
@@ -49,11 +82,14 @@ def generate_action_features_average(config, dataset, model, action_names, actio
 
     for (graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node) in tqdm(
             dataset, ncols=80):
+        graphSeq, goal2vec = _move_sequence_to_device(config, graphSeq, goal2vec)
         graphSeq.append(goal2vec)
 
         for i in range(len(graphSeq) - 1):
             with torch.no_grad():
+                _log_devices_once(model, graphSeq[i], graphSeq[i + 1])
                 output, output_features = model(graphSeq[i], graphSeq[i + 1])
+                output_features = output_features.detach().cpu()
             tmp_idx = None
             if actionSeq[i] in action_names:  # * Aciton already exists.
                 tmp_idx = action_names.index(actionSeq[i])

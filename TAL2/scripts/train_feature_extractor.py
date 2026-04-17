@@ -237,6 +237,7 @@ if __name__ == '__main__':
     val_data_path = './data/val_dataset.pkl'
     val_dataset = GraphDataset_State(config, graphs_dir, val_data_path)
 
+
     train_data_num = len(train_sequence_dataset)
     val_data_num = len(val_dataset)
 
