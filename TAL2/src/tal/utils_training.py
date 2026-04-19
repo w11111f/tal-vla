@@ -101,7 +101,22 @@ def load_model(config, filename, model, file_path=None, lr=None, strict=True):
     if os.path.exists(file_path):
         print(Color.GREEN + 'Loading pre-trained model: ' + file_path + Color.ENDC)
         checkpoint = torch.load(file_path, map_location=config.device)
-        model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
+        state_dict = checkpoint['model_state_dict']
+        current_state_dict = model.state_dict()
+
+        # Backward compatibility for checkpoints saved before object_vec became a registered buffer.
+        for compat_key in ['object_vec']:
+            if compat_key in current_state_dict and compat_key not in state_dict:
+                state_dict[compat_key] = current_state_dict[compat_key]
+
+        try:
+            model.load_state_dict(state_dict, strict=strict)
+        except RuntimeError as exc:
+            if 'object_vec' in str(exc):
+                print(Color.GREEN + 'Retrying checkpoint load with non-strict buffer compatibility.' + Color.ENDC)
+                model.load_state_dict(state_dict, strict=False)
+            else:
+                raise
         epoch = checkpoint['epoch']
         accuracy_list = checkpoint['accuracy_list']
     else:

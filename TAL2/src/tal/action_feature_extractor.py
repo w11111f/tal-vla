@@ -69,10 +69,22 @@ class AFE(nn.Module):
         l = []
         for obj in config.all_objects:
             l.append(config.object2vec[obj])
+        object_vec = torch.tensor(l, dtype=torch.float32)
         if self.config.device is not None:
-            self.object_vec = torch.tensor(l, dtype=torch.float32, device=self.config.device)
-        else:
-            self.object_vec = torch.tensor(l, dtype=torch.float32)
+            object_vec = object_vec.to(self.config.device)
+        self.register_buffer('object_vec', object_vec)
+
+    def _model_device(self):
+        return next(self.parameters()).device
+
+    def _ensure_graph_device(self, graph, device):
+        if hasattr(graph, 'to'):
+            graph = graph.to(device)
+        if hasattr(graph, 'ndata'):
+            for key, value in list(graph.ndata.items()):
+                if torch.is_tensor(value) and value.device != device:
+                    graph.ndata[key] = value.to(device)
+        return graph
 
     def _encode_graph(self, graph):
         hidden = graph.ndata['feat']
@@ -131,6 +143,9 @@ class AFE(nn.Module):
     def forward(self, g, goalVec):
         # * g: Start state.
         # * goalVec: Final state.
+        device = self._model_device()
+        g = self._ensure_graph_device(g, device)
+        goalVec = self._ensure_graph_device(goalVec, device)
         h_start = self._encode_graph(g)
         h_final = self._encode_graph(goalVec)
 
@@ -210,10 +225,22 @@ class AFE_MLP(nn.Module):
         l = []
         for obj in config.all_objects:
             l.append(config.object2vec[obj])
+        object_vec = torch.tensor(l, dtype=torch.float32)
         if self.config.device is not None:
-            self.object_vec = torch.tensor(l, dtype=torch.float32, device=self.config.device)
-        else:
-            self.object_vec = torch.tensor(l, dtype=torch.float32)
+            object_vec = object_vec.to(self.config.device)
+        self.register_buffer('object_vec', object_vec)
+
+    def _model_device(self):
+        return next(self.parameters()).device
+
+    def _ensure_graph_device(self, graph, device):
+        if hasattr(graph, 'to'):
+            graph = graph.to(device)
+        if hasattr(graph, 'ndata'):
+            for key, value in list(graph.ndata.items()):
+                if torch.is_tensor(value) and value.device != device:
+                    graph.ndata[key] = value.to(device)
+        return graph
 
     def _encode_graph(self, graph):
         hidden = graph.ndata['feat']
@@ -272,6 +299,9 @@ class AFE_MLP(nn.Module):
     def forward(self, g, goalVec):
         # * g: Start state.
         # * goalVec: Final state.
+        device = self._model_device()
+        g = self._ensure_graph_device(g, device)
+        goalVec = self._ensure_graph_device(goalVec, device)
         h_start = self._encode_graph(g)
         h_final = self._encode_graph(goalVec)
 

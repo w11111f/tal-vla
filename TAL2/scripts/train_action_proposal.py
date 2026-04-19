@@ -7,6 +7,7 @@ import colorama
 import dgl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from termcolor import cprint
 from torch import optim
 from torch.cuda.amp import GradScaler, autocast
@@ -36,6 +37,57 @@ def _ensure_batch_dim(tensor):
     if torch.is_tensor(tensor) and tensor.dim() == 1:
         return tensor.unsqueeze(0)
     return tensor
+
+
+def _zero_like_loss(tensor):
+    return tensor.sum() * 0.0
+
+
+def _categorical_nll_from_probs(pred_probs, target_one_hot):
+    mask = target_one_hot.sum(dim=1) > 0
+    if not torch.any(mask):
+        return _zero_like_loss(pred_probs)
+    pred_probs = pred_probs[mask].clamp_min(1e-8)
+    target_one_hot = target_one_hot[mask]
+    return -(target_one_hot * pred_probs.log()).sum(dim=1).mean()
+
+
+def _split_action_tensor(config, tensor):
+    num_actions = len(config.possibleActions)
+    num_objects = config.num_objects
+    idx0 = num_actions
+    idx1 = idx0 + num_objects
+    idx2 = idx1 + num_objects
+    return tensor[:, :idx0], tensor[:, idx0:idx1], tensor[:, idx1:idx2], tensor[:, idx2:]
+
+
+def _apn_loss(config, y_pred, y_true):
+    pred_action, pred_obj1, pred_obj2, pred_state = _split_action_tensor(config, y_pred)
+    true_action, true_obj1, true_obj2, true_state = _split_action_tensor(config, y_true)
+
+    loss_action = _categorical_nll_from_probs(pred_action, true_action)
+    loss_obj1 = _categorical_nll_from_probs(pred_obj1, true_obj1)
+
+    two_arg_mask = true_obj2.sum(dim=1) > 0
+    if torch.any(two_arg_mask):
+        loss_obj2_pos = _categorical_nll_from_probs(pred_obj2[two_arg_mask], true_obj2[two_arg_mask])
+    else:
+        loss_obj2_pos = _zero_like_loss(pred_obj2)
+
+    if torch.any(~two_arg_mask):
+        loss_obj2_neg = F.binary_cross_entropy(pred_obj2[~two_arg_mask], true_obj2[~two_arg_mask])
+    else:
+        loss_obj2_neg = _zero_like_loss(pred_obj2)
+
+    loss_state = F.binary_cross_entropy(pred_state, true_state)
+    total_loss = loss_action + loss_obj1 + loss_obj2_pos + 0.1 * loss_obj2_neg + 0.1 * loss_state
+    return total_loss, {
+        'loss_action': loss_action.detach().item(),
+        'loss_obj1': loss_obj1.detach().item(),
+        'loss_obj2_pos': loss_obj2_pos.detach().item(),
+        'loss_obj2_neg': loss_obj2_neg.detach().item(),
+        'loss_state': loss_state.detach().item(),
+    }
 
 
 def _pair_collate(batch):
@@ -82,11 +134,15 @@ def _apply_argument_noise(batch, enabled):
 
 def train_epoch(config, optimizer, scaler, loader, model, accum_steps=1, argument=False):
     model.train()
-    criterion = nn.BCELoss()
 
     metrics = {
         'total_loss': 0.0,
         'sample_count': 0,
+        'loss_action': 0.0,
+        'loss_obj1': 0.0,
+        'loss_obj2_pos': 0.0,
+        'loss_obj2_neg': 0.0,
+        'loss_state': 0.0,
     }
     epoch_start = time.perf_counter()
     data_time = 0.0
@@ -109,10 +165,13 @@ def train_epoch(config, optimizer, scaler, loader, model, accum_steps=1, argumen
         with autocast(enabled=torch.cuda.is_available()):
             y_pred = model(state_a, goal_state)
             y_pred = _ensure_batch_dim(y_pred)
-            loss = criterion(y_pred, action_ab)
+        with autocast(enabled=False):
+            loss, loss_metrics = _apn_loss(config, y_pred.float(), action_ab.float())
 
         metrics['total_loss'] += loss.item() * batch['batch_size']
         metrics['sample_count'] += batch['batch_size']
+        for key in ['loss_action', 'loss_obj1', 'loss_obj2_pos', 'loss_obj2_neg', 'loss_state']:
+            metrics[key] += loss_metrics[key] * batch['batch_size']
 
         scaled_loss = loss / accum_steps
         scaler.scale(scaled_loss).backward()
@@ -135,6 +194,8 @@ def train_epoch(config, optimizer, scaler, loader, model, accum_steps=1, argumen
     metrics['average_loss'] = (
         metrics['total_loss'] / metrics['sample_count'] if metrics['sample_count'] > 0 else 0.0
     )
+    for key in ['loss_action', 'loss_obj1', 'loss_obj2_pos', 'loss_obj2_neg', 'loss_state']:
+        metrics[key] = metrics[key] / metrics['sample_count'] if metrics['sample_count'] > 0 else 0.0
     metrics['data_time'] = data_time
     metrics['compute_time'] = compute_time
     metrics['total_time'] = total_time
@@ -226,6 +287,15 @@ if __name__ == '__main__':
             cprint('Time per epoch: {}'.format(metrics['total_time']), 'green')
             print('Loss sum: {}'.format(metrics['total_loss']))
             print('Loss avg: {}'.format(metrics['average_loss']))
+            print(
+                'Loss parts: action={:.4f} obj1={:.4f} obj2_pos={:.4f} obj2_neg={:.4f} state={:.4f}'.format(
+                    metrics['loss_action'],
+                    metrics['loss_obj1'],
+                    metrics['loss_obj2_pos'],
+                    metrics['loss_obj2_neg'],
+                    metrics['loss_state'],
+                )
+            )
             print(
                 'Epoch timing: data={:.2f}s compute={:.2f}s total={:.2f}s'.format(
                     metrics['data_time'], metrics['compute_time'], metrics['total_time']

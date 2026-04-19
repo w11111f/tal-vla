@@ -1,4 +1,5 @@
 import pickle
+import traceback
 import torch
 import colorama
 import warnings
@@ -149,5 +150,9 @@ if __name__ == '__main__':
                                                     MAX_SAMPLES=args.max_samples,
                                                     PRINT_SAMPLE_INFO=args.print_sample_info,
                                                     PROGRESS_DESC='TAL Test')
+    except Exception:
+        print('\n[test_policy_tal] Unhandled exception during policy evaluation:')
+        traceback.print_exc()
+        raise
     finally:
         approx.close_backend()

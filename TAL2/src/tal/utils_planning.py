@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from itertools import islice
+import traceback
 
 from src.envs import approx
 from src.tal.action_proposal_network import vec2action_grammatical
@@ -139,6 +140,8 @@ def check_policy_with_model_actions(
 
 def process_feature_with_pca(A, principal_directions=None, threshold=0.05, q_value=None):
     if principal_directions is not None:
+        if torch.is_tensor(principal_directions) and principal_directions.device != A.device:
+            principal_directions = principal_directions.to(A.device)
         ret_tensor = torch.matmul(A, principal_directions)
         ret_v = principal_directions
     else:
@@ -150,6 +153,8 @@ def process_feature_with_pca(A, principal_directions=None, threshold=0.05, q_val
         else:
             q_value = max(1, min(int(q_value), max_rank))
         U, S, V = torch.pca_lowrank(A, q=q_value)
+        if V.device != A.device:
+            V = V.to(A.device)
         ret_tensor = torch.matmul(A, V)
         ret_v = V
     # ret_v[ret_v < threshold] = 0
@@ -182,6 +187,8 @@ def check_policy_with_feature_pca_order(
     # * Convert to a tensor: each row is a [1, 512] action feature.
     # * squeeze(): [828, 1, 512] --> [828, 512], [action_num, feature_dim]
     action_features_tensor = torch.stack(action_features).squeeze(1)
+    if config.device is not None and action_features_tensor.device != config.device:
+        action_features_tensor = action_features_tensor.to(config.device)
     action_features_tensor, principal_directions = process_feature_with_pca(action_features_tensor,
                                                                             q_value=500)
 
@@ -217,6 +224,8 @@ def check_policy_with_feature_pca_order(
             # * 01. Generation: Direct.
             # * Select actions.
             act_generalized_inverse_mat = torch.linalg.pinv(action_features_tensor)
+            if act_generalized_inverse_mat.device != current_task_feature.device:
+                act_generalized_inverse_mat = act_generalized_inverse_mat.to(current_task_feature.device)
             output = torch.matmul(current_task_feature, act_generalized_inverse_mat)  # * !!!
 
             output = output.squeeze(0)
@@ -598,119 +607,129 @@ def test_policy_with_action_effect_features(
     else:
         data_container = dataset_iter
     for sample_idx, data_item in enumerate(data_container):
-        # * Get data.
-        if STATE_FORMAT_GOAL:  # * GraphDataset_State
-            graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node = data_item
-        else:  # * GraphDataset
-            graphSeq, goal2vec, goalObjects2vec, actionSeq, action2vec, goal_json, world_name, start_node = data_item
+        try:
+            # * Get data.
+            if STATE_FORMAT_GOAL:  # * GraphDataset_State
+                graphSeq, goal2vec, goal_json, actionSeq, action2vec, world_name, start_node = data_item
+            else:  # * GraphDataset
+                graphSeq, goal2vec, goalObjects2vec, actionSeq, action2vec, goal_json, world_name, start_node = data_item
 
-        if PRINT_SAMPLE_INFO:
-            print(
-                '[Sample {:>4}] world={} | plan_len={}'.format(
-                    sample_idx, world_name, len(actionSeq)
+            if PRINT_SAMPLE_INFO:
+                print(
+                    '[Sample {:>4}] world={} | plan_len={}'.format(
+                        sample_idx, world_name, len(actionSeq)
+                    )
                 )
-            )
 
-        # * Store action length to dict.
-        if str(len(actionSeq)) in data_num:
-            data_num[str(len(actionSeq))] += 1
-        else:
-            data_num[str(len(actionSeq))] = 1
-        if str(len(actionSeq)) not in data_correct_num:
-            data_correct_num[str(len(actionSeq))] = 0
+            # * Store action length to dict.
+            if str(len(actionSeq)) in data_num:
+                data_num[str(len(actionSeq))] += 1
+            else:
+                data_num[str(len(actionSeq))] = 1
+            if str(len(actionSeq)) not in data_correct_num:
+                data_correct_num[str(len(actionSeq))] = 0
 
-        world_num = _safe_numeric_suffix(world_name, default=0)
-        plan_len = len(actionSeq)
-        lenHuman.append(plan_len)
-        if ONLY_ACTION_MODEL:
-            res, len_acts, len_pred_acts = check_policy_with_model_actions(
-                config, model_action, data_item, world_num, INIT_DATAPOINT, STATE_FORMAT_GOAL
-            )
-            if res == 'Correct':
-                data_correct_num[str(len_acts)] += 1
-                correct += 1
-                lenModel.append(len_pred_acts)
-            elif res == 'Incorrect':
-                incorrect += 1
-            elif res == 'Error':
-                error += 1
-
-        elif ONLY_FEATURE_MODEL:
-            res, len_acts, len_pred_acts = check_policy_with_model_extract_feature_pca_wo_order(
-                config,
-                model_extract_feature,
-                data_item,
-                world_num,
-                action_effect_features,
-                INIT_DATAPOINT,
-                STATE_FORMAT_GOAL
-            )
-            if res == 'Correct':
-                data_correct_num[str(len_acts)] += 1
-                correct += 1
-                lenModel.append(len_pred_acts)
-            elif res == 'Incorrect':
-                incorrect += 1
-            elif res == 'Error':
-                error += 1
-
-        else:
-
-            if not IGNORE_ACTION_MODEL:
+            world_num = _safe_numeric_suffix(world_name, default=0)
+            plan_len = len(actionSeq)
+            lenHuman.append(plan_len)
+            if ONLY_ACTION_MODEL:
                 res, len_acts, len_pred_acts = check_policy_with_model_actions(
                     config, model_action, data_item, world_num, INIT_DATAPOINT, STATE_FORMAT_GOAL
                 )
-            else:
-                res = 'False'
-
-            if res == 'Correct':
-                data_correct_num[str(len_acts)] += 1
-                correct += 1
-                lenModel.append(len_pred_acts)
-            else:
-                tmp_res = None
-                # multiscale_pool = [(5, 3), (10, 3), (10, 5), (20, 5), (20, 10), (20, 15)]
-                if multiscale_pool is None:
-                    multiscale_pool = [(5, 2), (10, 5), (15, 5), (20, 5), (20, 10), (30, 5),
-                                       (30, 10)]
-                for (tmp_cdd_act_num, tmp_slt_act_num) in multiscale_pool:
-                    if WITH_PCA:
-                        res, len_acts, len_pred_acts = check_policy_with_feature_pca_order(
-                            config,
-                            model_action,
-                            model_extract_feature,
-                            data_item,
-                            world_num,
-                            action_effect_features,
-                            INIT_DATAPOINT,
-                            STATE_FORMAT_GOAL,
-                            candidate_action_num=tmp_cdd_act_num,
-                            select_from_candidate=tmp_slt_act_num
-                        )
-                    else:
-                        res, len_acts, len_pred_acts = check_policy_with_feature(
-                            config,
-                            model_action,
-                            model_extract_feature,
-                            data_item,
-                            world_num,
-                            action_effect_features,
-                            INIT_DATAPOINT,
-                            STATE_FORMAT_GOAL,
-                            candidate_action_num=tmp_cdd_act_num,
-                            select_from_candidate=tmp_slt_act_num
-                        )
-
-                    tmp_res = res
-                    if res == 'Correct':
-                        data_correct_num[str(len_acts)] += 1
-                        correct += 1
-                        lenModel.append(len_pred_acts)
-                        break
-                if tmp_res == 'Incorrect':
+                if res == 'Correct':
+                    data_correct_num[str(len_acts)] += 1
+                    correct += 1
+                    lenModel.append(len_pred_acts)
+                elif res == 'Incorrect':
                     incorrect += 1
-                elif tmp_res == 'Error':
+                elif res == 'Error':
                     error += 1
+
+            elif ONLY_FEATURE_MODEL:
+                res, len_acts, len_pred_acts = check_policy_with_model_extract_feature_pca_wo_order(
+                    config,
+                    model_extract_feature,
+                    data_item,
+                    world_num,
+                    action_effect_features,
+                    INIT_DATAPOINT,
+                    STATE_FORMAT_GOAL
+                )
+                if res == 'Correct':
+                    data_correct_num[str(len_acts)] += 1
+                    correct += 1
+                    lenModel.append(len_pred_acts)
+                elif res == 'Incorrect':
+                    incorrect += 1
+                elif res == 'Error':
+                    error += 1
+
+            else:
+
+                if not IGNORE_ACTION_MODEL:
+                    res, len_acts, len_pred_acts = check_policy_with_model_actions(
+                        config, model_action, data_item, world_num, INIT_DATAPOINT, STATE_FORMAT_GOAL
+                    )
+                else:
+                    res = 'False'
+
+                if res == 'Correct':
+                    data_correct_num[str(len_acts)] += 1
+                    correct += 1
+                    lenModel.append(len_pred_acts)
+                else:
+                    tmp_res = None
+                    if multiscale_pool is None:
+                        multiscale_pool = [(5, 2), (10, 5), (15, 5), (20, 5), (20, 10), (30, 5),
+                                           (30, 10)]
+                    for (tmp_cdd_act_num, tmp_slt_act_num) in multiscale_pool:
+                        if WITH_PCA:
+                            res, len_acts, len_pred_acts = check_policy_with_feature_pca_order(
+                                config,
+                                model_action,
+                                model_extract_feature,
+                                data_item,
+                                world_num,
+                                action_effect_features,
+                                INIT_DATAPOINT,
+                                STATE_FORMAT_GOAL,
+                                candidate_action_num=tmp_cdd_act_num,
+                                select_from_candidate=tmp_slt_act_num
+                            )
+                        else:
+                            res, len_acts, len_pred_acts = check_policy_with_feature(
+                                config,
+                                model_action,
+                                model_extract_feature,
+                                data_item,
+                                world_num,
+                                action_effect_features,
+                                INIT_DATAPOINT,
+                                STATE_FORMAT_GOAL,
+                                candidate_action_num=tmp_cdd_act_num,
+                                select_from_candidate=tmp_slt_act_num
+                            )
+
+                        tmp_res = res
+                        if res == 'Correct':
+                            data_correct_num[str(len_acts)] += 1
+                            correct += 1
+                            lenModel.append(len_pred_acts)
+                            break
+                    if tmp_res == 'Incorrect':
+                        incorrect += 1
+                    elif tmp_res == 'Error':
+                        error += 1
+        except Exception:
+            print(
+                '[test_policy_with_action_effect_features] sample={} world={} plan_len={}'.format(
+                    sample_idx,
+                    world_name if 'world_name' in locals() else 'unknown',
+                    len(actionSeq) if 'actionSeq' in locals() else 'unknown'
+                )
+            )
+            traceback.print_exc()
+            raise
 
     # * Print results.
     print('--' * 20)
@@ -1017,6 +1036,8 @@ def qualitative_policy_with_feature_pca_order(
     # * Convert to a tensor: each row is a [1, 512] action feature.
     # * squeeze(): [828, 1, 512] --> [828, 512], [action_num, feature_dim]
     action_features_tensor = torch.stack(action_features).squeeze(1)
+    if config.device is not None and action_features_tensor.device != config.device:
+        action_features_tensor = action_features_tensor.to(config.device)
     action_features_tensor, principal_directions = process_feature_with_pca(action_features_tensor,
                                                                             q_value=500)
 
@@ -1057,6 +1078,8 @@ def qualitative_policy_with_feature_pca_order(
             # * 01. Generation: Direct.
             # * Select actions.
             act_generalized_inverse_mat = torch.linalg.pinv(action_features_tensor)
+            if act_generalized_inverse_mat.device != current_task_feature.device:
+                act_generalized_inverse_mat = act_generalized_inverse_mat.to(current_task_feature.device)
             output = torch.matmul(current_task_feature, act_generalized_inverse_mat)  # * !!!
             output = output.squeeze(0)
             tpk = torch.topk(output, candidate_action_num)

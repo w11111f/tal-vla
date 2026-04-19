@@ -1,12 +1,25 @@
 import os
 from copy import deepcopy
-
 import numpy as np
+
+# ==============================================================================
+# 第一步：必须最先导入并实例化 SimulationApp
+# ==============================================================================
 try:
     from isaacsim import SimulationApp
 except ModuleNotFoundError:
     from omni.isaac.kit import SimulationApp
 
+_headless_env = os.environ.get("TAL_ISAAC_HEADLESS", "1").lower()
+_headless = _headless_env not in {"0", "false", "no"}
+
+# !!! 核心修改：在导入任何其他 Isaac Sim 模块前，必须先启动 SimulationApp !!!
+simulation_app = SimulationApp({"headless": _headless})
+
+
+# ==============================================================================
+# 第二步：SimulationApp 启动后，才可以安全导入其它的 omni, isaacsim, pxr 模块
+# ==============================================================================
 try:
     import isaaclab.sim as sim_utils
     _HAS_ISAACLAB = True
@@ -32,11 +45,11 @@ try:
 except ModuleNotFoundError:
     from omni.isaac.core.utils.stage import get_current_stage, open_stage, update_stage
 
-_headless_env = os.environ.get("TAL_ISAAC_HEADLESS", "1").lower()
-_headless = _headless_env not in {"0", "false", "no"}
-simulation_app = SimulationApp({"headless": _headless})
 from pxr import Usd, UsdGeom
 
+# ==============================================================================
+# 第三步：导入本地自定义模块
+# ==============================================================================
 from src.envs.datapoint import Datapoint
 
 

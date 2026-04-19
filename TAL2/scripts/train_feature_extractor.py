@@ -8,6 +8,7 @@ import colorama
 import dgl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from termcolor import cprint
 from torch import optim
 from torch.utils.data import DataLoader
@@ -62,6 +63,58 @@ def _ensure_batch_dim(tensor):
     return tensor
 
 
+def _zero_like_loss(tensor):
+    return tensor.sum() * 0.0
+
+
+def _categorical_nll_from_probs(pred_probs, target_one_hot):
+    mask = target_one_hot.sum(dim=1) > 0
+    if not torch.any(mask):
+        return _zero_like_loss(pred_probs)
+    pred_probs = pred_probs[mask].clamp_min(1e-8)
+    target_one_hot = target_one_hot[mask]
+    return -(target_one_hot * pred_probs.log()).sum(dim=1).mean()
+
+
+def _split_action_tensor(config, tensor):
+    num_actions = len(config.possibleActions)
+    num_objects = config.num_objects
+    idx0 = num_actions
+    idx1 = idx0 + num_objects
+    idx2 = idx1 + num_objects
+    return tensor[:, :idx0], tensor[:, idx0:idx1], tensor[:, idx1:idx2], tensor[:, idx2:]
+
+
+def _structured_action_loss(config, y_pred, y_true):
+    pred_action, pred_obj1, pred_obj2, pred_state = _split_action_tensor(config, y_pred)
+    true_action, true_obj1, true_obj2, true_state = _split_action_tensor(config, y_true)
+
+    loss_action = _categorical_nll_from_probs(pred_action, true_action)
+    loss_obj1 = _categorical_nll_from_probs(pred_obj1, true_obj1)
+
+    two_arg_mask = true_obj2.sum(dim=1) > 0
+    if torch.any(two_arg_mask):
+        loss_obj2_pos = _categorical_nll_from_probs(pred_obj2[two_arg_mask], true_obj2[two_arg_mask])
+    else:
+        loss_obj2_pos = _zero_like_loss(pred_obj2)
+
+    if torch.any(~two_arg_mask):
+        loss_obj2_neg = F.binary_cross_entropy(pred_obj2[~two_arg_mask], true_obj2[~two_arg_mask])
+    else:
+        loss_obj2_neg = _zero_like_loss(pred_obj2)
+
+    loss_state = F.binary_cross_entropy(pred_state, true_state)
+    total_loss = loss_action + loss_obj1 + loss_obj2_pos + 0.1 * loss_obj2_neg + 0.1 * loss_state
+    metrics = {
+        'action_name_loss': loss_action.detach().item(),
+        'arg1_loss': loss_obj1.detach().item(),
+        'arg2_pos_loss': loss_obj2_pos.detach().item(),
+        'arg2_neg_loss': loss_obj2_neg.detach().item(),
+        'state_loss': loss_state.detach().item(),
+    }
+    return total_loss, metrics
+
+
 def _pair_collate(batch):
     state_a = dgl.batch([item['state_a'] for item in batch])
     state_b = dgl.batch([item['state_b'] for item in batch])
@@ -114,7 +167,6 @@ def _rowwise_action_similarity(action_ab, action_bc):
 
 def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_steps=1):
     model.train()
-    criterion_action = nn.BCELoss()
     criterion_diff_actions = nn.CosineEmbeddingLoss(margin=0.2)
     criterion_feature = nn.MSELoss()
 
@@ -125,6 +177,11 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
         'diff_action_loss': 0.0,
         'pair_samples': 0,
         'triplet_samples': 0,
+        'action_name_loss': 0.0,
+        'arg1_loss': 0.0,
+        'arg2_pos_loss': 0.0,
+        'arg2_neg_loss': 0.0,
+        'state_loss': 0.0,
     }
 
     epoch_start = time.perf_counter()
@@ -153,8 +210,8 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
         delta_bc = _ensure_batch_dim(delta_bc)
         delta_ac = _ensure_batch_dim(delta_ac)
 
-        loss_action_1 = criterion_action(y_pred_ab, action_ab)
-        loss_action_2 = criterion_action(y_pred_bc, action_bc)
+        loss_action_1, loss_metrics_ab = _structured_action_loss(config, y_pred_ab, action_ab)
+        loss_action_2, loss_metrics_bc = _structured_action_loss(config, y_pred_bc, action_bc)
         loss_feature = criterion_feature(delta_ac, delta_ab + delta_bc)
         y_cosine_embed = _rowwise_action_similarity(action_ab, action_bc)
         loss_diff_actions = criterion_diff_actions(delta_ab, delta_bc, y_cosine_embed)
@@ -171,6 +228,8 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
         metrics['feature_loss'] += loss_feature.item()
         metrics['diff_action_loss'] += loss_diff_actions.item()
         metrics['triplet_samples'] += batch['batch_size']
+        for key in ['action_name_loss', 'arg1_loss', 'arg2_pos_loss', 'arg2_neg_loss', 'state_loss']:
+            metrics[key] += (loss_metrics_ab[key] + loss_metrics_bc[key]) * batch['batch_size']
         compute_time += time.perf_counter() - compute_start
         triplet_iter_start = time.perf_counter()
 
@@ -185,7 +244,7 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
 
         y_pred_ab, _ = model(state_a, state_b)
         y_pred_ab = _ensure_batch_dim(y_pred_ab)
-        loss = criterion_action(y_pred_ab, action_ab)
+        loss, loss_metrics_ab = _structured_action_loss(config, y_pred_ab, action_ab)
 
         (loss / accum_steps).backward()
         micro_step_count += 1
@@ -196,6 +255,8 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
         metrics['total_loss'] += loss.item()
         metrics['action_loss'] += loss.item()
         metrics['pair_samples'] += batch['batch_size']
+        for key in ['action_name_loss', 'arg1_loss', 'arg2_pos_loss', 'arg2_neg_loss', 'state_loss']:
+            metrics[key] += loss_metrics_ab[key] * batch['batch_size']
         compute_time += time.perf_counter() - compute_start
         pair_iter_start = time.perf_counter()
 
@@ -214,6 +275,9 @@ def train_epoch(config, optimizer, model, pair_loader, triplet_loader, accum_ste
     metrics['triplets_per_second'] = (
         metrics['triplet_samples'] / total_time if total_time > 0 else 0.0
     )
+    processed_action_losses = metrics['pair_samples'] + metrics['triplet_samples'] * 2
+    for key in ['action_name_loss', 'arg1_loss', 'arg2_pos_loss', 'arg2_neg_loss', 'state_loss']:
+        metrics[key] = metrics[key] / processed_action_losses if processed_action_losses > 0 else 0.0
     return metrics
 
 
@@ -298,6 +362,7 @@ if __name__ == '__main__':
     )
     model = model.to(config.device)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.9)
+    target_path = f"{config.MODEL_SAVE_PATH}/{seqTool}{model.name}_Trained.ckpt"
 
     test_frequency = 5
     if config.exec_type == 'train':
@@ -317,6 +382,15 @@ if __name__ == '__main__':
             print('Action loss: {}'.format(metrics['action_loss']))
             print('Feature loss: {}'.format(metrics['feature_loss']))
             print('Diff action feature loss: {}'.format(metrics['diff_action_loss']))
+            print(
+                'Action parts: name={:.4f} arg1={:.4f} arg2_pos={:.4f} arg2_neg={:.4f} state={:.4f}'.format(
+                    metrics['action_name_loss'],
+                    metrics['arg1_loss'],
+                    metrics['arg2_pos_loss'],
+                    metrics['arg2_neg_loss'],
+                    metrics['state_loss'],
+                )
+            )
             print(
                 'Epoch timing: data={:.2f}s compute={:.2f}s total={:.2f}s'.format(
                     metrics['data_time'], metrics['compute_time'], metrics['total_time']
@@ -354,7 +428,7 @@ if __name__ == '__main__':
                 )
             )
 
-            save_model(config, model, optimizer, epoch_num, accuracy_list)
+            save_model(config, model, optimizer, epoch_num, accuracy_list, file_path=target_path)
 
         train_acc = [i[0] for i in accuracy_list]
         val_acc = [i[1] for i in accuracy_list]
