@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 *.tmp
 *.log
+.env
+.env.*
+logs/
+.ipynb_checkpoints/
 *.pkl
 *.graph
 *.ckpt
@@ -30,3 +34,9 @@ openpi/**/checkpoints/
 openpi/**/*.graph
 openpi_repo_backup/
 openpi_flat_export/
+
+robot_ws/build/
+robot_ws/install/
+robot_ws/log/
+robot_ws/frames_*.gv
+robot_ws/frames_*.pdf

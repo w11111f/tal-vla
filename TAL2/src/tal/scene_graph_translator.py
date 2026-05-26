@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from copy import deepcopy
 
 from src.envs import approx
@@ -17,6 +18,8 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_DASHSCOPE_URL = (
     'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation'
 )
+DEFAULT_CURL_CONNECT_TIMEOUT_SEC = 15
+DEFAULT_CURL_MAX_TIME_SEC = 90
 
 DEFAULT_USER_PROMPT = (
     "\u4f60\u662f\u4e00\u4e2a\u673a\u5668\u4eba\u4efb\u52a1\u89c4\u5212\u52a9\u624b\u3002"
@@ -213,6 +216,12 @@ def _post_json_with_curl(url, payload, api_key):
     command = [
         curl_bin,
         '--location',
+        '--connect-timeout',
+        str(DEFAULT_CURL_CONNECT_TIMEOUT_SEC),
+        '--max-time',
+        str(DEFAULT_CURL_MAX_TIME_SEC),
+        '--show-error',
+        '--silent',
         url,
         '--header',
         'Authorization: Bearer {}'.format(api_key),
@@ -222,6 +231,12 @@ def _post_json_with_curl(url, payload, api_key):
         json.dumps(payload, ensure_ascii=False)
     ]
 
+    curl_begin = time.perf_counter()
+    print(
+        "[TALQwen] curl request begin | "
+        f"url={url} | model={payload.get('model')} | "
+        f"message_count={len(payload.get('input', {}).get('messages', []))}"
+    )
     completed = subprocess.run(
         command,
         capture_output=True,
@@ -230,6 +245,16 @@ def _post_json_with_curl(url, payload, api_key):
         errors='replace',
         check=False
     )
+    print(
+        "[TALQwen] curl request finished | "
+        f"elapsed={time.perf_counter() - curl_begin:.3f}s | "
+        f"returncode={completed.returncode} | stdout_len={len(completed.stdout)} | stderr_len={len(completed.stderr)}"
+    )
+    if completed.stderr.strip():
+        print(
+            "[TALQwen] curl stderr snippet | "
+            f"{completed.stderr.strip()[:500]}"
+        )
     if completed.returncode != 0:
         raise RuntimeError(
             'curl request failed with code {}: {}'.format(
@@ -240,6 +265,10 @@ def _post_json_with_curl(url, payload, api_key):
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
+        print(
+            "[TALQwen] curl stdout snippet | "
+            f"{completed.stdout[:500]}"
+        )
         raise RuntimeError(
             'DashScope returned non-JSON output: {}'.format(completed.stdout[:500])
         ) from exc
@@ -251,13 +280,29 @@ def translate_scene_graph_with_qwen(
         model_name='qwen3-max',
         api_key=None
 ):
+    trace_begin = time.perf_counter()
     api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
     if api_key is None or str(api_key).strip() == '':
         raise ValueError(
             'DashScope API key not found. Set DASHSCOPE_API_KEY or pass --qwen_api_key.'
         )
 
+    print(
+        "[TALQwen] translate_scene_graph_with_qwen start | "
+        f"instruction={instruction!r} | model={model_name} | "
+        f"nodes={len(current_scene_graph_json.get('nodes', []))} | "
+        f"edges={len(current_scene_graph_json.get('edges', []))} | "
+        f"api_key_present={bool(api_key)}"
+    )
+
+    message_begin = time.perf_counter()
     messages = build_scene_graph_translation_messages(current_scene_graph_json, instruction)
+    user_content = messages[-1].get('content', '') if messages else ''
+    print(
+        "[TALQwen] prompt built | "
+        f"elapsed={time.perf_counter() - message_begin:.3f}s | "
+        f"prompt_chars={len(user_content)}"
+    )
     payload = {
         'model': model_name,
         'input': {
@@ -268,11 +313,28 @@ def translate_scene_graph_with_qwen(
         }
     }
     response = _post_json_with_curl(DEFAULT_DASHSCOPE_URL, payload, api_key)
+    print(
+        "[TALQwen] response json received | "
+        f"elapsed={time.perf_counter() - trace_begin:.3f}s | "
+        f"top_level_keys={sorted(response.keys()) if isinstance(response, dict) else type(response).__name__}"
+    )
     if 'code' in response and response.get('code') not in [None, '']:
         raise RuntimeError('DashScope request failed: {}'.format(response))
 
+    extract_begin = time.perf_counter()
     response_text = _extract_response_text(response)
-    return _parse_json_response(response_text)
+    print(
+        "[TALQwen] response text extracted | "
+        f"elapsed={time.perf_counter() - extract_begin:.3f}s | text_chars={len(response_text)}"
+    )
+    parse_begin = time.perf_counter()
+    parsed = _parse_json_response(response_text)
+    print(
+        "[TALQwen] response JSON parsed | "
+        f"elapsed={time.perf_counter() - parse_begin:.3f}s | "
+        f"keys={sorted(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}"
+    )
+    return parsed
 
 
 def canonicalize_scene_graph_json(config, current_scene_graph_json, generated_scene_graph_json):
@@ -351,19 +413,54 @@ def translate_instruction_to_goal_state_graph(
         model_name='qwen3-max',
         api_key=None
 ):
+    trace_begin = time.perf_counter()
+    print(
+        "[TALQwen] translate_instruction_to_goal_state_graph start | "
+        f"instruction={instruction!r} | "
+        f"current_scene_graph_present={current_scene_graph_json is not None}"
+    )
     if current_scene_graph_json is None:
+        current_graph_begin = time.perf_counter()
         current_scene_graph_json = get_current_scene_graph_json(config)
+        print(
+            "[TALQwen] current scene graph fetched | "
+            f"elapsed={time.perf_counter() - current_graph_begin:.3f}s | "
+            f"nodes={len(current_scene_graph_json.get('nodes', []))} | "
+            f"edges={len(current_scene_graph_json.get('edges', []))}"
+        )
 
+    qwen_begin = time.perf_counter()
     raw_goal_scene_graph_json = translate_scene_graph_with_qwen(
         current_scene_graph_json=current_scene_graph_json,
         instruction=instruction,
         model_name=model_name,
         api_key=api_key
     )
+    print(
+        "[TALQwen] raw goal scene graph ready | "
+        f"elapsed={time.perf_counter() - qwen_begin:.3f}s | "
+        f"nodes={len(raw_goal_scene_graph_json.get('nodes', [])) if isinstance(raw_goal_scene_graph_json, dict) else 'n/a'} | "
+        f"edges={len(raw_goal_scene_graph_json.get('edges', [])) if isinstance(raw_goal_scene_graph_json, dict) else 'n/a'}"
+    )
+
+    canonical_begin = time.perf_counter()
     goal_scene_graph_json = canonicalize_scene_graph_json(
         config,
         current_scene_graph_json=current_scene_graph_json,
         generated_scene_graph_json=raw_goal_scene_graph_json
     )
+    print(
+        "[TALQwen] canonical goal scene graph ready | "
+        f"elapsed={time.perf_counter() - canonical_begin:.3f}s | "
+        f"nodes={len(goal_scene_graph_json.get('nodes', []))} | "
+        f"edges={len(goal_scene_graph_json.get('edges', []))}"
+    )
+
+    dgl_begin = time.perf_counter()
     goal_state_graph = scene_graph_json_to_dgl(config, goal_scene_graph_json)
+    print(
+        "[TALQwen] goal_state_graph built | "
+        f"elapsed={time.perf_counter() - dgl_begin:.3f}s | "
+        f"total_elapsed={time.perf_counter() - trace_begin:.3f}s"
+    )
     return current_scene_graph_json, goal_scene_graph_json, goal_state_graph

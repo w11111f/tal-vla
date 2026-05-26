@@ -104,7 +104,6 @@ def _scene_ready_for_reuse(config):
     return (
         _loaded_scene_usd_path == config.scene_usd_path
         and stage is not None
-        and len(object_prims) == len(config.all_objects)
         and all(prim.is_valid() for prim in object_prims.values())
         and _scene_baseline_metrics is not None
     )
@@ -174,6 +173,10 @@ def _read_prim_metadata(config, tal_name, usd_name):
     usd_prim = stage.GetPrimAtPath(f"/World/{usd_name}")
     if not usd_prim.IsValid():
         raise RuntimeError(f"Prim not found in expff.usd: /World/{usd_name}")
+    size = _compute_size(usd_prim)
+    size_overrides = getattr(config, "object_size_overrides", {})
+    if tal_name in size_overrides:
+        size = list(size_overrides[tal_name])
     metadata = {
         "tal_name": tal_name,
         "usd_name": usd_name,
@@ -182,7 +185,7 @@ def _read_prim_metadata(config, tal_name, usd_name):
         "applied_schemas": list(usd_prim.GetAppliedSchemas()),
         "authored_attributes": sorted(attr.GetName() for attr in usd_prim.GetAuthoredAttributes()),
         "semantic_properties": list(config.object_property_map.get(tal_name, [])),
-        "size": _compute_size(usd_prim),
+        "size": size,
     }
     return metadata
 
@@ -190,8 +193,15 @@ def _read_prim_metadata(config, tal_name, usd_name):
 def _refresh_scene_cache(config):
     global object_prims
     object_prims = {}
+    missing_objects = []
     for tal_name, usd_name in config.tal_to_usd.items():
         prim_path = f"/World/{usd_name}"
+        usd_prim = stage.GetPrimAtPath(prim_path)
+        if not usd_prim.IsValid():
+            missing_objects.append((tal_name, prim_path))
+            config.usd_metadata.pop(tal_name, None)
+            continue
+
         prim = XFormPrim(prim_path)
         if not prim.is_valid():
             raise RuntimeError(f"Invalid prim wrapper for: {prim_path}")
@@ -204,6 +214,11 @@ def _refresh_scene_cache(config):
         if obj_entry is not None:
             obj_entry["properties"] = list(metadata["semantic_properties"])
             obj_entry["size"] = list(metadata["size"])
+
+    config.missing_scene_objects = [tal_name for tal_name, _ in missing_objects]
+    if missing_objects:
+        missing_text = ", ".join(f"{tal_name}({prim_path})" for tal_name, prim_path in missing_objects)
+        print(f"[IsaacEnv] Warning: skipping missing scene objects: {missing_text}")
 
 
 def _print_scene_summary(config):

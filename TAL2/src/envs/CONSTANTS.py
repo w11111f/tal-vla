@@ -136,9 +136,42 @@ class EnvironmentConfig:
         # Real-robot deployment defaults: the arm sits near the base center and
         # should stop the mobile base about 0.5 m from target objects.
         self.base_approach_distance = 0.50
-        self.pick_approach_distance = 0.50
-        self.place_approach_distance = 0.50
-        self.push_approach_distance = 0.55
+        self.pick_approach_distance = 0.32
+        self.place_approach_distance = 0.40
+        self.push_approach_distance = 0.45
+        self.nav_approach_distance_overrides = {
+            "tray": 0.36,
+            "big-tray": 0.32,
+            "stool": 0.30,
+            "table": 0.38,
+        }
+        self.arm_effective_reach_m = 0.40
+        # Unit direction in map XY from the object center to the preferred base
+        # stop point. This keeps navigation on the tray front side instead of
+        # choosing a side from the robot's current position.
+        self.nav_approach_direction_overrides = {
+            "tray": [-1.0, 0.0],
+        }
+        # Keep the USD root yaw equal to the logical base_link yaw. If the
+        # visual nose appears reversed in a different USD asset, override this
+        # with TAL_ROBOT_ROOT_YAW_OFFSET.
+        self.robot_root_yaw_offset = 0.0
+        self.lidar_footprint_overrides = {
+            "cube_red": [0.06, 0.06],
+            "tray": [0.36, 0.24],
+            "big-tray": [0.52, 0.38],
+            "bottle_red": [0.08, 0.08],
+            "stool": [0.42, 0.42],
+            "table": [0.90, 0.60],
+        }
+        self.object_size_overrides = {
+            "cube_red": [0.10, 0.10, 0.10],
+            "tray": [0.36, 0.24, 0.08],
+            "big-tray": [0.52, 0.38, 0.10],
+            "bottle_red": [0.08, 0.08, 0.24],
+            "stool": [0.42, 0.42, 0.45],
+            "table": [0.90, 0.60, 0.50],
+        }
 
         # changeState is removed from the reduced real-robot action space.
         self.object_state_map = {}
